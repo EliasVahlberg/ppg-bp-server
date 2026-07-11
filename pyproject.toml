@@ -1,0 +1,44 @@
+[project]
+name = "ppg-pi-server"
+version = "0.1.0"
+description = "Ingest server + dashboard for PPG-BP monitoring"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "duckdb>=1.5.2",
+    "python-multipart>=0.0.20",
+    "httpx>=0.28",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.7",
+]
+dashboard = [
+    "dash>=2.18",
+    "plotly>=5.24",
+]
+
+[project.scripts]
+ppg-pi-server = "ppg_pi_server.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ppg_pi_server"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

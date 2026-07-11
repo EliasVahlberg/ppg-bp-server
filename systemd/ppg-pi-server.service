@@ -1,0 +1,45 @@
+# Systemd service unit for the the user's BP Pi backend.
+#
+# Install:
+#   sudo cp ppg-pi-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ppg-pi-server
+#
+# Customise: edit `User=`, `WorkingDirectory=`, `Environment=` to match
+# the Pi's setup (paths, the Tailscale IP to bind to).
+
+[Unit]
+Description=the user's BP Pi backend (FastAPI ingest server)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/ppg-pi-server/source/pi
+
+# DuckDB and uploads live outside the source checkout so updates don't
+# touch them. Adjust as needed.
+Environment=PPG_PI_SERVER_DB_PATH=/var/lib/ppg-pi-server/sessions.duckdb
+Environment=PPG_PI_SERVER_UPLOAD_DIR=/var/lib/ppg-pi-server/uploads
+Environment=PPG_PI_SERVER_TOKENS_FILE=/var/lib/ppg-pi-server/tokens.json
+# Bind to the Tailscale interface only. Replace 100.x.y.z with the
+# Pi's actual tailnet IP; you can fetch it with `tailscale ip -4`.
+Environment=PPG_PI_SERVER_BIND_HOST=0.0.0.0
+Environment=PPG_PI_SERVER_BIND_PORT=8000
+
+ExecStart=/home/pi/.local/bin/uv run ppg-pi-server serve
+
+Restart=on-failure
+RestartSec=5
+
+# Reasonable hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/ppg-pi-server
+
+[Install]
+WantedBy=multi-user.target
