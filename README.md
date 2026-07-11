@@ -64,6 +64,8 @@ Logs: `journalctl --user -u ppg-pi-server -f`. Every request is logged with meth
 | GET | `/api/v1/sessions` | bearer | List recent sessions |
 | POST | `/api/v1/cuff` | bearer | Upload cuff readings (deduped by reading ID) |
 
+`GET /` is intentionally unauthenticated (it's the human-facing landing page) but does show recent session UUID prefixes, device names, and sample counts. That's low-sensitivity metadata, not health data, but it means anyone who can reach the port sees it. This server has no app-level access control of its own for that route; it relies entirely on network-layer isolation (Tailscale, or a LAN you trust) to keep it private. Don't expose the port beyond that without adding auth to `/` too.
+
 ## Configuration
 
 Env vars, prefix `PPG_PI_SERVER_`:
@@ -73,7 +75,7 @@ Env vars, prefix `PPG_PI_SERVER_`:
 | `PPG_PI_SERVER_DB_PATH` | `data/sessions.duckdb` | Canonical DuckDB store |
 | `PPG_PI_SERVER_UPLOAD_DIR` | `data/uploads` | Raw staged bundles, kept as a backup against DB corruption |
 | `PPG_PI_SERVER_TOKENS_FILE` | `data/tokens.json` | Bearer-token allowlist |
-| `PPG_PI_SERVER_BIND_HOST` / `_BIND_PORT` | `0.0.0.0` / `8000` | Listen address |
+| `PPG_PI_SERVER_BIND_HOST` / `_BIND_PORT` | `127.0.0.1` / `8000` | Listen address. Loopback-only by default; set to your Tailscale interface IP (or `0.0.0.0` behind your own firewall) to actually receive uploads |
 | `PPG_PI_SERVER_ANALYSIS_REFRESH_URL` | unset | If set, POSTs here after a sync completes to trigger dashboard recomputation |
 | `PPG_PI_SERVER_LOG_LEVEL` | `INFO` | Set `DEBUG` for verbose per-request logging |
 

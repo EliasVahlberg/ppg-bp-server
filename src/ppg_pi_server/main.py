@@ -14,6 +14,12 @@ Routes:
 
 The phone uploads the bundle files (``manifest.json``, ``segments.jsonl``,
 ``notes.*``, ``*.rop``), optionally gzip-encoded, then calls ``complete``.
+
+Note: ``GET /`` is intentionally unauthenticated (human-facing landing page)
+and shows session UUID prefixes, device names, and sample counts. This is
+low-sensitivity metadata, but the server relies on network-layer isolation
+(bind to a Tailscale interface, or a trusted LAN) rather than app-level auth
+for that one route. See ``config.Settings.bind_host``.
 """
 
 from __future__ import annotations

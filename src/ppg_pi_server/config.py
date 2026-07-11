@@ -61,10 +61,13 @@ class Settings(BaseSettings):
 
     # Networking
     bind_host: str = Field(
-        default="0.0.0.0",
+        default="127.0.0.1",
         description=(
-            "Host to bind. In production, set this to the Tailscale "
-            "interface IP so the API is only reachable from the tailnet."
+            "Host to bind. Defaults to loopback-only so a fresh install "
+            "never listens on the network before you've explicitly chosen "
+            "an interface. In production, set this to your Tailscale "
+            "interface IP (or 0.0.0.0 if you're handling access control "
+            "with a firewall) so the API is reachable from the tailnet/LAN."
         ),
     )
     bind_port: int = Field(

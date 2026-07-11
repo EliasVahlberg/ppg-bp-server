@@ -1,4 +1,4 @@
-# Systemd service unit for the the user's BP Pi backend.
+# Systemd service unit for a ppg-bp ingest server deployment.
 #
 # Install:
 #   sudo cp ppg-pi-server.service /etc/systemd/system/
@@ -6,10 +6,10 @@
 #   sudo systemctl enable --now ppg-pi-server
 #
 # Customise: edit `User=`, `WorkingDirectory=`, `Environment=` to match
-# the Pi's setup (paths, the Tailscale IP to bind to).
+# your setup (paths, the Tailscale IP to bind to).
 
 [Unit]
-Description=the user's BP Pi backend (FastAPI ingest server)
+Description=ppg-bp ingest server (FastAPI)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
@@ -24,9 +24,12 @@ WorkingDirectory=/opt/ppg-pi-server/source/pi
 Environment=PPG_PI_SERVER_DB_PATH=/var/lib/ppg-pi-server/sessions.duckdb
 Environment=PPG_PI_SERVER_UPLOAD_DIR=/var/lib/ppg-pi-server/uploads
 Environment=PPG_PI_SERVER_TOKENS_FILE=/var/lib/ppg-pi-server/tokens.json
-# Bind to the Tailscale interface only. Replace 100.x.y.z with the
-# Pi's actual tailnet IP; you can fetch it with `tailscale ip -4`.
-Environment=PPG_PI_SERVER_BIND_HOST=0.0.0.0
+# Default (PPG_PI_SERVER_BIND_HOST unset) is loopback-only, i.e. unreachable
+# from the network. To actually receive uploads from a phone, bind to your
+# Tailscale interface IP -- replace 100.x.y.z below with the real tailnet IP
+# (get it with `tailscale ip -4`), or use 0.0.0.0 only if you're separately
+# enforcing access control with a firewall.
+Environment=PPG_PI_SERVER_BIND_HOST=100.x.y.z
 Environment=PPG_PI_SERVER_BIND_PORT=8000
 
 ExecStart=/home/pi/.local/bin/uv run ppg-pi-server serve
