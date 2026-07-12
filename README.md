@@ -1,5 +1,9 @@
 # ppg-bp-server
 
+<p align="center">
+  <img src="docs/branding/logos/banner.svg" alt="ppg-bp-server: an arterial/PPG pulse waveform mark, a stacked-disk glyph, and the ppg-bp-server wordmark" width="500">
+</p>
+
 Ingest server and analysis dashboard for the ppg-bp project. Runs wherever you want it — a Raspberry Pi, an old laptop, a desktop that's on most of the time — and receives session uploads from [ppg-bp-android](https://github.com/EliasVahlberg/ppg-bp-android) over plain HTTP on your own network.
 
 Not a medical device. Read [DISCLAIMER.md](DISCLAIMER.md) first.
