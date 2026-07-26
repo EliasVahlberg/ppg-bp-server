@@ -70,6 +70,32 @@ Logs: `journalctl --user -u ppg-pi-server -f`. Every request is logged with meth
 
 `GET /` is intentionally unauthenticated (it's the human-facing landing page) but does show recent session UUID prefixes, device names, and sample counts. That's low-sensitivity metadata, not health data, but it means anyone who can reach the port sees it. This server has no app-level access control of its own for that route; it relies entirely on network-layer isolation (Tailscale, or a LAN you trust) to keep it private. Don't expose the port beyond that without adding auth to `/` too.
 
+## Hardware and sizing
+
+The server is not CPU-bound in normal operation — ingest is file staging plus a DuckDB conversion, and the dashboard recomputes derived tables on demand. Storage is the real constraint, because raw per-sample data accumulates fast.
+
+**Recommended baseline: Raspberry Pi 5, 8 GB RAM, 256 GB SSD** (USB-SSD or NVMe HAT, not an SD card — this is a sustained-append workload and SD cards wear out and corrupt under it).
+
+RAM matters for the dashboard, not ingest: DuckDB analysis over a year of per-minute derived tables is comfortable on 8 GB and cramped on 4 GB. Ingest alone runs fine on 2 GB.
+
+Storage, derived from the per-sample record sizes in `ppg-bp/docs/design/android_recorder.md` §6 (PPG 32 B, ACC/GYRO 24 B):
+
+| Capture profile | Streams | Rate | Per hour |
+|---|---|---|---|
+| `calibration` | PPG 176 + ACC 416 + GYRO 416 Hz | 25.0 KB/s | ~92 MB/h |
+| `monitor` | PPG 176 + ACC 52 Hz | 6.7 KB/s | ~25 MB/h |
+
+For a representative deployment — 12 h/day on `monitor`, plus two 30-minute `calibration` sessions a week — that is roughly **310 MB/day of raw data**:
+
+| Retention policy | Per month | Per year |
+|---|---|---|
+| Canonical DuckDB only (raw uploads pruned after conversion) | ~9 GB | ~112 GB |
+| Raw upload backup kept alongside DuckDB (the default) | ~15 GB | ~179 GB |
+
+So a 60 GB disk holds about 4 months at default settings, and 256 GB covers a year with headroom. The DuckDB figures above conservatively assume no compression gain over raw; actual columnar compression on this data has not been measured yet, so real usage is likely lower.
+
+`PPG_PI_SERVER_UPLOAD_DIR` keeps raw staged bundles indefinitely as a hedge against DB corruption. That is the single biggest lever on disk usage — pruning it after successful conversion roughly cuts consumption by 40%, at the cost of losing the ability to re-derive the canonical store from scratch.
+
 ## Configuration
 
 Env vars, prefix `PPG_PI_SERVER_`:

@@ -4,7 +4,7 @@
 
 ## What this project actually is
 
-Software for capturing and analyzing PPG (photoplethysmography) signals from a consumer fitness sensor (Polar Verity Sense), and for estimating blood pressure trends from that data. It was built to track blood pressure instability in a family member with Multiple System Atrophy (MSA), calibrated against a home oscillometric cuff.
+Software for capturing and analyzing PPG (photoplethysmography) signals from a consumer fitness sensor (Polar Verity Sense), and for estimating blood pressure trends from that data. The target is blood pressure tracking in non-standard cases, where population-trained models don't transfer and per-person calibration against a cuff is unavoidable. The motivating case is Multiple System Atrophy (MSA), which destroys autonomic BP regulation and produces large, fast swings that a few cuff readings a day will miss entirely.
 
 It is a personal engineering project, not a clinical product. Use it the same way you'd use any other piece of DIY health software you found on GitHub: read the code, understand what it does, and decide for yourself whether you trust it.
 

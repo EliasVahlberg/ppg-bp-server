@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking a look. This started as a one-person tool to track a family member's blood pressure, so the bar for contributing is "does this make the tool better or more correct," not "does this match some broader roadmap."
+Thanks for taking a look. This started as a one-person tool for tracking blood pressure in a case that needs per-person calibration, so the bar for contributing is "does this make the tool better or more correct," not "does this match some broader roadmap."
 
 ## Before you open a PR
 
