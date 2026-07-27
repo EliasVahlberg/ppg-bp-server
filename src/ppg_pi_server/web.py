@@ -26,6 +26,7 @@ import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
+from . import series as series_mod
 from . import status as status_mod
 from .auth import SESSION_COOKIE, require_viewer, resolve_token
 from .config import Settings, get_settings
@@ -93,6 +94,23 @@ async def api_status(
     finally:
         con.close()
     payload["viewer"] = viewer.get("phone_id")
+    return JSONResponse(content=payload)
+
+
+@router.get("/api/v1/series")
+async def api_series(
+    viewer: Annotated[dict, Depends(require_viewer)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    days: int = 60,
+) -> JSONResponse:
+    """Chart data. Separate from /status so a slow series query cannot delay the
+    warnings, which are the part that matters when something is wrong."""
+    days = max(1, min(int(days), 730))
+    con = _read_only_connection(settings)
+    try:
+        payload = series_mod.collect(con, timezone=settings.local_timezone, days=days)
+    finally:
+        con.close()
     return JSONResponse(content=payload)
 
 

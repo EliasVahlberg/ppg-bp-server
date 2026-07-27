@@ -127,6 +127,72 @@ function renderTables(d) {
   );
 }
 
+/* Charts are fetched separately from status: a slow series query must not delay
+   the warnings, which are the part that matters when something is wrong. */
+async function loadCharts() {
+  const days = parseInt(el("range").value, 10);
+  try {
+    const r = await fetch("/api/v1/series?days=" + days, { credentials: "same-origin" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    renderCharts(await r.json(), days);
+  } catch (e) {
+    el("charts").innerHTML = '<p class="empty">Charts unavailable: ' + e.message + "</p>";
+  }
+}
+
+function card(title, note, body) {
+  return (
+    '<div class="card"><h3>' + title + "</h3>" +
+    (note ? '<p class="note">' + note + "</p>" : "") + body + "</div>"
+  );
+}
+
+function renderCharts(d, days) {
+  /* One set of charts per subject. Merging subjects would produce a plausible
+     line that means nothing, and a chart is where that mistake stops being
+     visible. */
+  const subjects = [...new Set(d.cuff.map((p) => p.subject_id))];
+  if (!subjects.length) subjects.push(null);
+
+  let html = "";
+  subjects.forEach((sid) => {
+    const cuff = sid ? d.cuff.filter((p) => p.subject_id === sid) : [];
+    const pairs = sid ? d.pairs.filter((p) => p.subject_id === sid) : d.pairs;
+    const cov = sid ? d.coverage.filter((p) => p.subject_id === sid) : d.coverage;
+    if (subjects.length > 1) html += "<h2>Subject " + sid + "</h2>";
+    html += card(
+      "Blood pressure (cuff)",
+      "Measured with the oscillometric cuff, the only pressure reference in this project.",
+      Charts.bpTrend(cuff)
+    );
+    html += card(
+      "By hour of day",
+      "Pump setting and time of day are entangled in this dataset, so a difference " +
+        "between settings may be a difference between morning and afternoon.",
+      Charts.diurnal(cuff)
+    );
+    html += card(
+      "Collection coverage",
+      "Minutes recorded per day, with cuff readings marked. Empty days are the point.",
+      Charts.coverage(cov, Math.min(days, 30))
+    );
+    html += card(
+      "Calibration pairs",
+      "PPG heart rate against cuff pulse for readings taken during a recording. A " +
+        "sanity check that both instruments saw the same person at the same time, " +
+        "not a calibration curve.",
+      Charts.pairs(pairs)
+    );
+  });
+  html += card(
+    "PPG signal quality",
+    "Hourly mean signal quality index and, on hover, the PPG heart rate. No blood " +
+      "pressure is estimated from PPG here.",
+    Charts.quality(d.quality)
+  );
+  el("charts").innerHTML = html;
+}
+
 function render(d, stale) {
   el("warnings").innerHTML = renderWarnings(d.warnings);
   el("subjects").innerHTML = d.subjects.length
@@ -167,6 +233,7 @@ async function load() {
     last = await r.json();
     lastAt = Date.now();
     render(last, false);
+    if (!el("charts").innerHTML) loadCharts();
   } catch (e) {
     if (last) render(last, true);
     else showLogin("Could not reach the server: " + e.message);
@@ -186,12 +253,14 @@ el("login-form").addEventListener("submit", async (ev) => {
     if (!r.ok) return showLogin("That token was not accepted.");
     el("token").value = "";
     await load();
+    await loadCharts();
   } catch (e) {
     showLogin("Sign-in failed: " + e.message);
   }
 });
 
-el("refresh").addEventListener("click", load);
+el("refresh").addEventListener("click", () => { load(); loadCharts(); });
+el("range").addEventListener("change", loadCharts);
 el("signout").addEventListener("click", async () => {
   await fetch("/app/logout", { method: "POST", credentials: "same-origin" });
   last = null;

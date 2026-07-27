@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PPG-BP status</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#0b3d63">
+<meta name="theme-color" content="#0d1210">
+<meta name="color-scheme" content="dark">
 <link rel="stylesheet" href="/app/app.css">
 </head>
 <body>
@@ -36,6 +37,19 @@
   <section id="warnings" aria-label="Warnings"></section>
   <section id="subjects" aria-label="Subjects"></section>
 
+  <div class="meta" style="margin:0 0 var(--md)">
+    <label for="range" style="margin:0">Window</label>
+    <select id="range">
+      <option value="14">14 days</option>
+      <option value="30">30 days</option>
+      <option value="60" selected>60 days</option>
+      <option value="180">6 months</option>
+      <option value="730">Everything</option>
+    </select>
+  </div>
+
+  <section id="charts" aria-label="Charts"></section>
+
   <details id="details">
     <summary>Recent recordings, cuff readings and calibration markers</summary>
     <div id="tables"></div>
@@ -51,6 +65,7 @@
   </p>
 </footer>
 
+<script src="/app/charts.js"></script>
 <script src="/app/app.js"></script>
 </body>
 </html>

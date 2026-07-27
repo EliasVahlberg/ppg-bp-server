@@ -3,7 +3,9 @@
    from an unknown point in the past is worse than no number, and the page
    already shows the last fetched payload marked stale when the network fails. */
 const CACHE = "ppgbp-shell-v1";
-const SHELL = ["/app", "/app/app.css", "/app/app.js", "/manifest.webmanifest"];
+const SHELL = ["/app", "/app/app.css", "/app/app.js", "/app/charts.js",
+               "/app/font/JetBrainsMono-Regular.ttf", "/app/font/JetBrainsMono-Bold.ttf",
+               "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
