@@ -1,0 +1,13 @@
+# Daily snapshot, with Persistent=true so a machine that was asleep at the
+# scheduled time still takes one when it wakes.
+
+[Unit]
+Description=Daily ppg-bp server data snapshot
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -45,14 +45,33 @@ Point your phone's `SET_SERVER` at `http://<this-machine's-LAN-IP>:8000` with th
 
 ## Running it persistently
 
-A `systemd` user-service unit is included (`systemd/ppg-pi-server.service`). No root required:
+Two `systemd` unit templates are included, because the two realistic deployments differ:
+
+- **`systemd/ppg-pi-server.user.service`** — a user service on a desktop or laptop you log into. No root required.
+- **`systemd/ppg-pi-server.service`** — a system service for a dedicated always-on box such as a Pi. Needs root to install, runs as its own user.
+
+For the user service:
 
 ```bash
-cp systemd/ppg-pi-server.service ~/.config/systemd/user/
+cp systemd/ppg-pi-server.user.service ~/.config/systemd/user/ppg-pi-server.service
 systemctl --user daemon-reload
 systemctl --user enable --now ppg-pi-server
-loginctl enable-linger $USER   # keep running after logout
+loginctl enable-linger $USER   # keep running after logout, and start at boot
 ```
+
+Set `PPG_PI_SERVER_BIND_HOST` in the unit before starting it. The default is loopback-only, so a fresh install never listens on a network until you have chosen an interface — for a tailnet deployment, use the address from `tailscale ip -4`.
+
+### Backups
+
+`scripts/backup.sh` takes a snapshot: raw uploads (hardlinked against the previous snapshot, so unchanged bundles cost no disk), the token allowlist, and a Parquet export of the DuckDB store. The database export runs against a read-only connection, so the server keeps serving during a backup. Run it on a timer:
+
+```bash
+cp systemd/ppg-pi-backup.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ppg-pi-backup.timer   # daily, Persistent=true
+```
+
+A snapshot on the same disk protects against database corruption, a bad migration, or an accidental delete. It does not protect against losing the disk, and off-machine replication is a precondition for ever deleting data from the phone (see #4).
 
 Logs: `journalctl --user -u ppg-pi-server -f`. Every request is logged with method, path, status, and duration; every session conversion logs per-sensor sample counts and elapsed time; auth failures log the token prefix. Set `PPG_PI_SERVER_LOG_LEVEL=DEBUG` for per-file upload logging.
 

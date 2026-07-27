@@ -1,0 +1,23 @@
+# Snapshot backup of the ingest server's data. Triggered by the timer of the
+# same name; safe to run at any time, since the DuckDB export is read-only and
+# needs no downtime.
+#
+# Install (user service, no root):
+#   cp systemd/ppg-pi-backup.* ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ppg-pi-backup.timer
+
+[Unit]
+Description=ppg-bp server data snapshot
+After=ppg-pi-server.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/my_repos/ppg-bp-server
+
+Environment=PPG_PI_SERVER_DB_PATH=%h/.local/share/ppg-pi-server/sessions.duckdb
+Environment=PPG_PI_SERVER_UPLOAD_DIR=%h/.local/share/ppg-pi-server/uploads
+Environment=PPG_PI_SERVER_TOKENS_FILE=%h/.local/share/ppg-pi-server/tokens.json
+Environment=PPG_PI_BACKUP_DIR=%h/.local/share/ppg-pi-server-backups
+
+ExecStart=%h/.local/bin/uv run scripts/backup.sh --keep 14

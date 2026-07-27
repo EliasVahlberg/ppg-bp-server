@@ -1,0 +1,50 @@
+# Systemd *user* service unit — runs as your own login user, no root.
+#
+# Use this variant when the server runs on a normal desktop or laptop you log
+# into. Use `ppg-pi-server.service` (system unit) for a dedicated always-on box
+# such as a Pi.
+#
+# Install:
+#   cp systemd/ppg-pi-server.user.service ~/.config/systemd/user/ppg-pi-server.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ppg-pi-server
+#   loginctl enable-linger $USER    # keep running after logout and across reboots
+#
+# `%h` expands to your home directory, so the paths below need no editing.
+# The one thing you must set is PPG_PI_SERVER_BIND_HOST (see below).
+
+[Unit]
+Description=ppg-bp ingest server (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/ppg-bp-server
+
+# Data lives outside the source checkout, so a git pull or a rebuild cannot
+# touch the canonical store.
+Environment=PPG_PI_SERVER_DB_PATH=%h/.local/share/ppg-pi-server/sessions.duckdb
+Environment=PPG_PI_SERVER_UPLOAD_DIR=%h/.local/share/ppg-pi-server/uploads
+Environment=PPG_PI_SERVER_TOKENS_FILE=%h/.local/share/ppg-pi-server/tokens.json
+
+# Default (unset) is loopback-only, i.e. unreachable from any phone. Set this to
+# your Tailscale interface address (`tailscale ip -4`) so the API is reachable
+# from the tailnet and from nowhere else. Bearer-token auth still applies to
+# every data endpoint; the bind address is defence in depth, not the access
+# control. Use 0.0.0.0 only if you are enforcing access control some other way.
+Environment=PPG_PI_SERVER_BIND_HOST=100.x.y.z
+Environment=PPG_PI_SERVER_BIND_PORT=8000
+
+ExecStart=%h/.local/bin/uv run ppg-pi-server serve
+
+# Tailscale may not have configured the interface by the time this first starts,
+# so the initial bind can fail. Retry rather than give up.
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
