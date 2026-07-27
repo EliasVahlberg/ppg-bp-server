@@ -76,6 +76,30 @@ function legend(items) {
   );
 }
 
+/* Split a series wherever the time gap exceeds maxGap, so a line is never drawn
+   across a period with no data. Connecting two readings a fortnight apart implies
+   a trajectory that was never measured, which is the one thing a trend chart must
+   not invent. Gaps here are frequent and meaningful: this is intermittent
+   self-measurement, not continuous monitoring. */
+function segments(points, maxGap) {
+  const out = [];
+  let cur = [];
+  points.forEach((p, i) => {
+    if (i > 0 && p.ts - points[i - 1].ts > maxGap) {
+      if (cur.length) out.push(cur);
+      cur = [];
+    }
+    cur.push(p);
+  });
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+/* A day between cuff readings is normal; more than that is a gap in collection. */
+const CUFF_GAP_S = 36 * 3600;
+/* Quality is hourly, so three empty buckets means recording actually stopped. */
+const QUALITY_GAP_S = 3 * 3600;
+
 const dayFmt = (ts) =>
   new Date(ts * 1000).toLocaleDateString("sv-SE", { month: "2-digit", day: "2-digit" });
 
@@ -108,20 +132,26 @@ function bpTrend(points, h) {
          C.red + '">90</text>';
   }
 
-  const band =
-    points.map((p) => xs(p.ts).toFixed(1) + "," + ys(p.sys).toFixed(1)).join(" ") + " " +
-    points.slice().reverse().map((p) => xs(p.ts).toFixed(1) + "," + ys(p.dia).toFixed(1)).join(" ");
-  s += '<polygon points="' + band + '" fill="' + C.green + '" opacity="0.10"/>';
-
-  [["sys", C.green], ["dia", C.sage]].forEach(([k, col]) => {
-    s += '<polyline fill="none" stroke="' + col + '" stroke-width="1.6" points="' +
-         points.map((p) => xs(p.ts).toFixed(1) + "," + ys(p[k]).toFixed(1)).join(" ") + '"/>';
-    points.forEach((p) => {
-      const flag = k === "sys" && p.sys < 90;
-      s += '<circle cx="' + xs(p.ts).toFixed(1) + '" cy="' + ys(p[k]).toFixed(1) +
-           '" r="' + (flag ? 3.4 : 2.2) + '" fill="' + (flag ? C.red : col) + '"><title>' +
-           esc(new Date(p.ts * 1000).toLocaleString("sv-SE") + "  " + p.sys + "/" + p.dia +
-               " mmHg, pulse " + p.pulse) + "</title></circle>";
+  const segs = segments(points, CUFF_GAP_S);
+  segs.forEach((seg) => {
+    if (seg.length > 1) {
+      const band =
+        seg.map((p) => xs(p.ts).toFixed(1) + "," + ys(p.sys).toFixed(1)).join(" ") + " " +
+        seg.slice().reverse().map((p) => xs(p.ts).toFixed(1) + "," + ys(p.dia).toFixed(1)).join(" ");
+      s += '<polygon points="' + band + '" fill="' + C.green + '" opacity="0.10"/>';
+    }
+    [["sys", C.green], ["dia", C.sage]].forEach(([k, col]) => {
+      if (seg.length > 1) {
+        s += '<polyline fill="none" stroke="' + col + '" stroke-width="1.6" points="' +
+             seg.map((p) => xs(p.ts).toFixed(1) + "," + ys(p[k]).toFixed(1)).join(" ") + '"/>';
+      }
+      seg.forEach((p) => {
+        const flag = k === "sys" && p.sys < 90;
+        s += '<circle cx="' + xs(p.ts).toFixed(1) + '" cy="' + ys(p[k]).toFixed(1) +
+             '" r="' + (flag ? 3.4 : 2.2) + '" fill="' + (flag ? C.red : col) + '"><title>' +
+             esc(new Date(p.ts * 1000).toLocaleString("sv-SE") + "  " + p.sys + "/" + p.dia +
+                 " mmHg, pulse " + p.pulse) + "</title></circle>";
+      });
     });
   });
   s += "</svg>";
@@ -129,7 +159,8 @@ function bpTrend(points, h) {
     { color: C.green, label: "Systolic" },
     { color: C.sage, label: "Diastolic" },
     { color: C.red, label: "Below 90 mmHg" },
-  ]);
+    { color: C.outline, label: segs.length > 1 ? segs.length + " runs, gaps not bridged" : "" },
+  ].filter((i) => i.label));
 }
 
 /* ---------------------------------------------------------------- diurnal */
@@ -239,8 +270,12 @@ function quality(rows, h) {
   s += '<line x1="' + PAD.l + '" y1="' + ys(0.8) + '" x2="' + (w - PAD.r) + '" y2="' + ys(0.8) +
        '" stroke="' + C.amber + '" stroke-width="1" stroke-dasharray="4 3"/>';
   const pts = rows.filter((r) => r.sqi !== null);
-  s += '<polyline fill="none" stroke="' + C.green + '" stroke-width="1.4" points="' +
-       pts.map((r) => xs(r.ts).toFixed(1) + "," + ys(r.sqi).toFixed(1)).join(" ") + '"/>';
+  segments(pts, QUALITY_GAP_S).forEach((seg) => {
+    if (seg.length > 1) {
+      s += '<polyline fill="none" stroke="' + C.green + '" stroke-width="1.4" points="' +
+           seg.map((r) => xs(r.ts).toFixed(1) + "," + ys(r.sqi).toFixed(1)).join(" ") + '"/>';
+    }
+  });
   pts.forEach((r) => {
     s += '<circle cx="' + xs(r.ts).toFixed(1) + '" cy="' + ys(r.sqi).toFixed(1) +
          '" r="2" fill="' + (r.sqi >= 0.8 ? C.green : C.amber) + '"><title>' +
