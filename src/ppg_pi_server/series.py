@@ -35,6 +35,25 @@ QUALITY_BUCKET = "hour"
 PAIR_HR_WINDOW_S = 90.0
 
 
+def _f(value: Any, digits: int | None = None) -> float | None:
+    """Float or None, rejecting NaN and infinity.
+
+    Real ``derived_ppg_minute`` rows carry NaN where a minute had no usable pulse,
+    and ``json.dumps`` emits a bare ``NaN`` token that is not valid JSON -- FastAPI
+    raises instead, so one bad minute would take out the whole chart payload. A
+    missing value is a gap in a chart, which is the honest rendering anyway.
+    """
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):  # NaN or infinite
+        return None
+    return round(f, digits) if digits is not None else f
+
+
 def _tables(con: duckdb.DuckDBPyConnection) -> set[str]:
     return {
         r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()
@@ -76,7 +95,7 @@ def cuff_points(
     ).fetchall()
     return [
         {
-            "ts": r[0],
+            "ts": _f(r[0]),
             "sys": r[1],
             "dia": r[2],
             "pulse": r[3],
@@ -118,7 +137,7 @@ def coverage_days(
             out[(day, sid)] = {
                 "day": day,
                 "subject_id": sid,
-                "recorded_minutes": round(float(minutes or 0), 1),
+                "recorded_minutes": _f(minutes, 1) or 0.0,
                 "sessions": int(n),
                 "cuff_count": 0,
             }
@@ -172,11 +191,11 @@ def quality_series(con: duckdb.DuckDBPyConnection, *, days: int = 30) -> list[di
     ).fetchall()
     return [
         {
-            "ts": r[0],
-            "sqi": round(float(r[1]), 3) if r[1] is not None else None,
-            "hr": round(float(r[2]), 1) if r[2] is not None else None,
+            "ts": _f(r[0]),
+            "sqi": _f(r[1], 3),
+            "hr": _f(r[2], 1),
             "minutes": int(r[3]),
-            "motion": round(float(r[4]), 2) if r[4] is not None else None,
+            "motion": _f(r[4], 2),
         }
         for r in rows
     ]
@@ -236,14 +255,14 @@ def pair_points(con: duckdb.DuckDBPyConnection, *, tz: str) -> list[dict[str, An
     ).fetchall()
     return [
         {
-            "ts": r[0],
+            "ts": _f(r[0]),
             "sys": r[1],
             "dia": r[2],
             "pulse": r[3],
             "subject_id": r[4],
             "session_id": r[5],
-            "hr_ppg": round(float(r[6]), 1) if r[6] is not None else None,
-            "sqi": round(float(r[7]), 3) if r[7] is not None else None,
+            "hr_ppg": _f(r[6], 1),
+            "sqi": _f(r[7], 3),
         }
         for r in rows
     ]

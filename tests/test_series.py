@@ -221,6 +221,40 @@ def test_quality_is_bucketed_hourly(store):
     assert rows[1]["minutes"] == 1
 
 
+def test_nan_values_do_not_break_the_payload(store):
+    """Real derived_ppg_minute rows carry NaN where a minute had no usable pulse.
+    json.dumps emits a bare NaN token, which is not valid JSON, so one bad minute
+    would otherwise take out the entire chart response -- as it did on first
+    deployment against the live store."""
+    con = duckdb.connect(str(store))
+    base = NOW_ISH - (NOW_ISH % 3600)
+    con.execute(
+        "INSERT INTO derived_ppg_minute VALUES (?, 'u-a', 'NaN'::DOUBLE, "
+        "'NaN'::DOUBLE, 0.1, 4.0, 4000)",
+        [base],
+    )
+    con.close()
+
+    con = duckdb.connect(str(store), read_only=True)
+    try:
+        rows = series.quality_series(con, days=30)
+        payload = series.collect(con, days=30)
+    finally:
+        con.close()
+    assert rows[0]["sqi"] is None and rows[0]["hr"] is None
+    import json
+
+    json.dumps(payload)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [(1.234, 1.23), (None, None), (float("nan"), None), (float("inf"), None)],
+)
+def test_float_guard(value, expected):
+    assert series._f(value, 2) == expected
+
+
 def test_day_window_filters_old_readings(store):
     con = duckdb.connect(str(store))
     tz = series.local_timezone(con)
