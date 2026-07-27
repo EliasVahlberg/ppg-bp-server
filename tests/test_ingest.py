@@ -232,3 +232,111 @@ class TestCuff:
         r = client.post("/api/v1/cuff", json={"readings": []}, headers=AUTH)
         assert r.status_code == 200
         assert r.json()["received"] == 0
+
+    # ---------------------------------------------------------------- #2 clock
+
+    @staticmethod
+    def _query(sql: str, params: list | None = None):
+        import duckdb
+
+        from ppg_pi_server.config import get_settings
+
+        con = duckdb.connect(str(get_settings().db_path), read_only=True)
+        try:
+            return con.execute(sql, params or []).fetchall()
+        finally:
+            con.close()
+
+    def test_clock_provenance_is_stored(self, client):
+        r = self._reading(11, sys=131)
+        r |= {
+            "phone_read_at": "2026-05-31T17:11:04",
+            "clock_offset_s": -1.0,
+            "clock_offset_uncertainty_s": 0.5,
+            "clock_valid": True,
+        }
+        assert client.post("/api/v1/cuff", json={"readings": [r]},
+                           headers=AUTH).status_code == 200
+        row = self._query(
+            "SELECT phone_read_at, clock_offset_s, clock_offset_uncertainty_s, "
+            "clock_valid FROM cuff_readings WHERE reading_id = ?", [r["id"]])[0]
+        assert row == ("2026-05-31T17:11:04", -1.0, 0.5, True)
+
+    def test_readings_without_clock_fields_are_still_accepted(self, client):
+        # An app build older than #9 sends none of these. Rejecting it would
+        # strand readings on a phone that cannot be updated remotely.
+        r = self._reading(12, sys=132)
+        assert client.post("/api/v1/cuff", json={"readings": [r]},
+                           headers=AUTH).status_code == 200
+        assert self._query(
+            "SELECT clock_offset_s FROM cuff_readings WHERE reading_id = ?",
+            [r["id"]])[0][0] is None
+
+    def test_clock_fields_backfill_a_row_ingested_without_them(self, client):
+        # The phone re-uploads its entire store on every sync, so a row that
+        # landed before this change gets its provenance on the next sync. With
+        # DO NOTHING it would have stayed blank forever.
+        bare = self._reading(13, sys=133)
+        client.post("/api/v1/cuff", json={"readings": [bare]}, headers=AUTH)
+        enriched = bare | {"phone_read_at": "2026-05-31T17:13:02",
+                           "clock_offset_s": -2.0, "clock_valid": True}
+        r = client.post("/api/v1/cuff", json={"readings": [enriched]},
+                        headers=AUTH).json()
+        assert r["inserted"] == 0, "backfill must not create a duplicate row"
+        assert self._query(
+            "SELECT phone_read_at, clock_offset_s FROM cuff_readings "
+            "WHERE reading_id = ?", [bare["id"]])[0] == ("2026-05-31T17:13:02", -2.0)
+
+    def test_existing_provenance_is_not_overwritten(self, client):
+        # A later read measures a different offset. The first measurement is the
+        # one contemporaneous with the reading, so it wins; a fresh offset
+        # belongs to the readings taken since, not to this one.
+        first = self._reading(14, sys=134) | {"clock_offset_s": -1.0,
+                                             "clock_valid": True}
+        client.post("/api/v1/cuff", json={"readings": [first]}, headers=AUTH)
+        later = self._reading(14, sys=134) | {"clock_offset_s": -900.0,
+                                             "clock_valid": True}
+        client.post("/api/v1/cuff", json={"readings": [later]}, headers=AUTH)
+        assert self._query(
+            "SELECT clock_offset_s FROM cuff_readings WHERE reading_id = ?",
+            [first["id"]])[0][0] == -1.0
+
+    def test_unmeasurable_clock_stores_null_offset_and_invalid(self, client):
+        # A halted RTC has no offset -- the difference is elapsed downtime, not
+        # drift -- so the offset must be NULL rather than a misleading number,
+        # and the reading marked untrustworthy.
+        r = self._reading(15, sys=135) | {"clock_offset_s": None,
+                                         "clock_valid": False,
+                                         "clock_suspect": True, "slot": 42}
+        client.post("/api/v1/cuff", json={"readings": [r]}, headers=AUTH)
+        assert self._query(
+            "SELECT clock_offset_s, clock_valid, clock_suspect, slot "
+            "FROM cuff_readings WHERE reading_id = ?",
+            [r["id"]])[0] == (None, False, True, 42)
+
+    def test_migration_adds_columns_to_a_predating_database(self, tmp_path):
+        # Reproduces the shape of a store created before this change, then runs
+        # the schema init over it. Additive only: the existing row survives.
+        import duckdb
+
+        from ppg_pi_server.schema import init_cuff_schema
+
+        db = tmp_path / "old.duckdb"
+        con = duckdb.connect(str(db))
+        con.execute(
+            "CREATE TABLE cuff_readings (reading_id VARCHAR PRIMARY KEY, "
+            "taken_at VARCHAR, sys INTEGER, dia INTEGER, pulse INTEGER, "
+            "ihb BOOLEAN, mov BOOLEAN, device VARCHAR, "
+            "uploader_phone_id VARCHAR, uploaded_at DOUBLE)"
+        )
+        con.execute("INSERT INTO cuff_readings VALUES "
+                    "('x|120|70|72', 'x', 120, 70, 72, false, false, 'AA', 'p', 1.0)")
+        init_cuff_schema(con)
+        cols = {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'cuff_readings'").fetchall()}
+        assert {"phone_read_at", "clock_offset_s", "clock_offset_uncertainty_s",
+                "clock_valid", "clock_suspect", "slot"} <= cols
+        assert con.execute("SELECT count(*) FROM cuff_readings").fetchone()[0] == 1
+        init_cuff_schema(con)  # idempotent: running twice must not raise
+        con.close()

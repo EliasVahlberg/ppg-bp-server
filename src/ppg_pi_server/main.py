@@ -151,6 +151,16 @@ class CuffReadingIn(BaseModel):
     mov: bool = False
     device: str | None = None
 
+    # Clock provenance from ppg-bp-android#9. All optional: an older app build
+    # sends none of them, and rejecting those uploads would strand readings on a
+    # phone we cannot update remotely.
+    phone_read_at: str | None = None
+    clock_offset_s: float | None = None
+    clock_offset_uncertainty_s: float | None = None
+    clock_valid: bool | None = None
+    clock_suspect: bool = False
+    slot: int | None = None
+
 
 class CuffUploadRequest(BaseModel):
     readings: list[CuffReadingIn]

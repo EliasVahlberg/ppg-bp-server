@@ -206,13 +206,29 @@ class Ingestor:
             for r in readings:
                 con.execute(
                     "INSERT INTO cuff_readings (reading_id, taken_at, sys, dia, "
-                    "pulse, ihb, mov, device, uploader_phone_id, uploaded_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT (reading_id) DO NOTHING",
+                    "pulse, ihb, mov, device, uploader_phone_id, uploaded_at, "
+                    "phone_read_at, clock_offset_s, clock_offset_uncertainty_s, "
+                    "clock_valid, clock_suspect, slot) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    # Fill clock provenance on a row that predates it, but never
+                    # overwrite a value already recorded: the phone re-uploads its
+                    # whole store on every sync, and DO NOTHING would leave rows
+                    # ingested before this change permanently blank.
+                    "ON CONFLICT (reading_id) DO UPDATE SET "
+                    "  phone_read_at = coalesce(cuff_readings.phone_read_at, excluded.phone_read_at), "
+                    "  clock_offset_s = coalesce(cuff_readings.clock_offset_s, excluded.clock_offset_s), "
+                    "  clock_offset_uncertainty_s = coalesce("
+                    "      cuff_readings.clock_offset_uncertainty_s, excluded.clock_offset_uncertainty_s), "
+                    "  clock_valid = coalesce(cuff_readings.clock_valid, excluded.clock_valid), "
+                    "  clock_suspect = coalesce(cuff_readings.clock_suspect, excluded.clock_suspect), "
+                    "  slot = coalesce(cuff_readings.slot, excluded.slot)",
                     [
                         r["id"], r["ts"], r["sys"], r["dia"], r["pulse"],
                         bool(r.get("ihb", False)), bool(r.get("mov", False)),
                         r.get("device"), uploader_phone_id, now,
+                        r.get("phone_read_at"), r.get("clock_offset_s"),
+                        r.get("clock_offset_uncertainty_s"), r.get("clock_valid"),
+                        bool(r.get("clock_suspect", False)), r.get("slot"),
                     ],
                 )
             after = con.execute("SELECT count(*) FROM cuff_readings").fetchone()[0]

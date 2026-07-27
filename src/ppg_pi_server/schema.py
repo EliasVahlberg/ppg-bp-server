@@ -51,7 +51,48 @@ def init_cuff_schema(con: duckdb.DuckDBPyConnection) -> None:
             mov               BOOLEAN,              -- body-movement flag
             device            VARCHAR,              -- cuff BLE address/name
             uploader_phone_id VARCHAR,
-            uploaded_at       DOUBLE
+            uploaded_at       DOUBLE,
+
+            -- Clock provenance, measured by the phone on every cuff read
+            -- (ppg-bp-android#9). taken_at above is the cuff's own wall time and
+            -- is never rewritten, because the phone's dedup identity is derived
+            -- from it. Corrected time is derived at analysis time as
+            -- taken_at - clock_offset_s, which is why the offset has to be
+            -- stored per reading rather than assumed constant.
+            phone_read_at              VARCHAR,   -- ISO-8601, phone clock at read
+            clock_offset_s             DOUBLE,    -- cuff minus phone; NULL if unmeasurable
+            clock_offset_uncertainty_s DOUBLE,    -- half the BLE read window
+            clock_valid                BOOLEAN,   -- False => timestamp not trustworthy
+            clock_suspect              BOOLEAN,   -- quarantined on the phone
+            slot                       INTEGER    -- ring-buffer slot, quarantine only
         )
         """
     )
+    _migrate_cuff_columns(con)
+
+
+# Columns added after the table first shipped. DuckDB has no "ADD COLUMN IF NOT
+# EXISTS", and this project has no migration framework, so reconcile by
+# inspecting the catalogue. Additive only: never drops or retypes a column, so a
+# database that predates any of these is upgraded in place without touching rows.
+_CUFF_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("phone_read_at", "VARCHAR"),
+    ("clock_offset_s", "DOUBLE"),
+    ("clock_offset_uncertainty_s", "DOUBLE"),
+    ("clock_valid", "BOOLEAN"),
+    ("clock_suspect", "BOOLEAN"),
+    ("slot", "INTEGER"),
+)
+
+
+def _migrate_cuff_columns(con: duckdb.DuckDBPyConnection) -> None:
+    existing = {
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'cuff_readings'"
+        ).fetchall()
+    }
+    for name, sql_type in _CUFF_ADDED_COLUMNS:
+        if name not in existing:
+            con.execute(f"ALTER TABLE cuff_readings ADD COLUMN {name} {sql_type}")
