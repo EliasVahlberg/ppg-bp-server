@@ -20,6 +20,12 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from .config import Settings, get_settings
+from .identity import (
+    Viewer,
+    subjects_from_token,
+    viewer_for_login,
+    whois,
+)
 
 logger = logging.getLogger("ppg_pi_server.auth")
 
@@ -57,6 +63,7 @@ def add_token(
     *,
     token: str | None = None,
     scope: str = SCOPE_WRITE,
+    subjects: list[str] | None = None,
 ) -> str:
     """Add a token to the allowlist. Returns the (existing or new) token."""
     if scope not in (SCOPE_WRITE, SCOPE_READ):
@@ -73,6 +80,10 @@ def add_token(
         "created_at": datetime.now(UTC).isoformat(),
         "scope": scope,
     }
+    # Absent key means "all subjects", so an unscoped token behaves exactly as
+    # tokens did before scoping existed.
+    if subjects:
+        tokens[new_token]["subjects"] = list(subjects)
     settings.save_tokens(tokens)
     return new_token
 
@@ -135,22 +146,37 @@ async def require_viewer(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
     settings: Annotated[Settings, Depends(get_settings)] = ...,
-) -> dict:
-    """Read access, from either a bearer header or the session cookie.
+) -> Viewer:
+    """Identify the caller and decide which subjects they may see.
 
-    Any valid token may read. The cookie exists because a browser cannot send a
-    bearer header on a plain navigation, and asking a patient to paste a token on
-    every visit would guarantee the page never gets used.
+    A token wins when present, because it is an explicit choice by whoever pasted
+    it. Otherwise, if tailnet identity is enabled, the source address is resolved
+    through tailscaled. Failing both, 401.
     """
     token: str | None = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
     if token is None:
         token = request.cookies.get(SESSION_COOKIE)
+
     meta = resolve_token(settings, token)
-    if meta is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Sign in required",
+    if meta is not None:
+        return Viewer(
+            name=str(meta.get("phone_id") or "token"),
+            subjects=subjects_from_token(meta),
+            method="token",
         )
-    return meta
+
+    if settings.tailnet_identity and request.client is not None:
+        addr = f"{request.client.host}:{request.client.port or 0}"
+        viewer = viewer_for_login(whois(addr), settings.subject_access)
+        if viewer is not None:
+            logger.info("tailnet viewer %s (%s)", viewer.name, addr)
+            return viewer
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Sign in required",
+    )
+
+

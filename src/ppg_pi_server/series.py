@@ -19,7 +19,7 @@ from typing import Any
 
 import duckdb
 
-from .status import local_timezone
+from .status import _subject_clause, local_timezone
 
 #: Cap on returned cuff points. Two months of six-a-day readings is ~360, so this
 #: is generous; it exists so a pathological store cannot blow up the payload.
@@ -61,7 +61,11 @@ def _tables(con: duckdb.DuckDBPyConnection) -> set[str]:
 
 
 def cuff_points(
-    con: duckdb.DuckDBPyConnection, *, tz: str, days: int | None = None
+    con: duckdb.DuckDBPyConnection,
+    *,
+    tz: str,
+    days: int | None = None,
+    subjects: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Cuff readings as epoch-stamped points.
 
@@ -72,8 +76,13 @@ def cuff_points(
     """
     if "cuff_readings" not in _tables(con):
         return []
-    where = ["coalesce(clock_suspect, FALSE) = FALSE"]
-    params: list[Any] = [tz]
+    subj_clause, subj_params = _subject_clause(subjects, "uploader_phone_id")
+    where = ["coalesce(clock_suspect, FALSE) = FALSE", subj_clause]
+    # Parameters are positional, so they are assembled in the same order the
+    # placeholders appear in the statement: the SELECT's timezone, then the
+    # subject list, then the window. Appending them in any other order silently
+    # binds the timezone as a subject name and returns nothing.
+    params: list[Any] = [tz, *subj_params]
     if days:
         where.append(
             f"epoch(timezone(?, taken_at::TIMESTAMP)) >= epoch(now()) - {int(days) * 86400}"
@@ -108,7 +117,11 @@ def cuff_points(
 
 
 def coverage_days(
-    con: duckdb.DuckDBPyConnection, *, tz: str, days: int = 30
+    con: duckdb.DuckDBPyConnection,
+    *,
+    tz: str,
+    days: int = 30,
+    subjects: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Per-day recorded minutes and cuff-reading counts, per subject.
 
@@ -117,6 +130,8 @@ def coverage_days(
     """
     tables = _tables(con)
     out: dict[tuple[str, str], dict[str, Any]] = {}
+    sess_clause, sess_params = _subject_clause(subjects, "u.uploader_phone_id")
+    cuff_clause, cuff_params = _subject_clause(subjects, "uploader_phone_id")
 
     if {"sessions", "uploads"} <= tables:
         rows = con.execute(
@@ -129,9 +144,10 @@ def coverage_days(
             FROM sessions s
             LEFT JOIN uploads u ON u.phone_session_uuid = s.session_uuid
             WHERE s.start_time >= epoch(now()) - {int(days) * 86400}
+              AND {sess_clause}
             GROUP BY 1, 2
             """,
-            [tz],
+            [tz, *sess_params],
         ).fetchall()
         for day, sid, minutes, n in rows:
             out[(day, sid)] = {
@@ -150,9 +166,10 @@ def coverage_days(
                    count(*) AS n
             FROM cuff_readings
             WHERE epoch(timezone(?, taken_at::TIMESTAMP)) >= epoch(now()) - {int(days) * 86400}
+              AND {cuff_clause}
             GROUP BY 1, 2
             """,
-            [tz],
+            [tz, *cuff_params],
         ).fetchall()
         for day, sid, n in rows:
             entry = out.setdefault(
@@ -201,7 +218,9 @@ def quality_series(con: duckdb.DuckDBPyConnection, *, days: int = 30) -> list[di
     ]
 
 
-def pair_points(con: duckdb.DuckDBPyConnection, *, tz: str) -> list[dict[str, Any]]:
+def pair_points(
+    con: duckdb.DuckDBPyConnection, *, tz: str, subjects: tuple[str, ...] | None = None
+) -> list[dict[str, Any]]:
     """Cuff readings that fall inside a recording, with the PPG heart rate there.
 
     The seed of the calibration view. Same guards as the status pair count: same
@@ -211,6 +230,7 @@ def pair_points(con: duckdb.DuckDBPyConnection, *, tz: str) -> list[dict[str, An
     tables = _tables(con)
     if not {"cuff_readings", "sessions", "uploads"} <= tables:
         return []
+    subj_clause, subj_params = _subject_clause(subjects, "cr.uploader_phone_id")
     has_minutes = "derived_ppg_minute" in tables
     hr_expr = (
         f"""(SELECT avg(m.hr_ppg) FROM derived_ppg_minute m
@@ -232,7 +252,8 @@ def pair_points(con: duckdb.DuckDBPyConnection, *, tz: str) -> list[dict[str, An
                    cr.sys, cr.dia, cr.pulse,
                    coalesce(cr.uploader_phone_id, 'unknown') AS subject_id
             FROM cuff_readings cr
-            WHERE coalesce(cr.clock_valid, FALSE)
+            WHERE {subj_clause}
+              AND coalesce(cr.clock_valid, FALSE)
               AND NOT coalesce(cr.clock_suspect, FALSE)
         )
         SELECT * FROM (
@@ -251,7 +272,7 @@ def pair_points(con: duckdb.DuckDBPyConnection, *, tz: str) -> list[dict[str, An
         WHERE session_id IS NOT NULL
         ORDER BY ts
         """,
-        [tz],
+        [tz, *subj_params],
     ).fetchall()
     return [
         {
@@ -273,14 +294,20 @@ def collect(
     *,
     timezone: str | None = None,
     days: int = 60,
+    subjects: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Everything the charts need, in one response."""
+    """Everything the charts need, in one response, scoped to ``subjects``."""
     tz = timezone or local_timezone(con)
+    unrestricted = subjects is None or "*" in subjects
     return {
         "timezone": tz,
         "days": days,
-        "cuff": cuff_points(con, tz=tz, days=days),
-        "coverage": coverage_days(con, tz=tz, days=min(days, 30)),
-        "quality": quality_series(con, days=days),
-        "pairs": pair_points(con, tz=tz),
+        "scope": list(subjects) if subjects else ["*"],
+        "cuff": cuff_points(con, tz=tz, days=days, subjects=subjects),
+        "coverage": coverage_days(con, tz=tz, days=min(days, 30), subjects=subjects),
+        # derived_ppg_minute has no uploader column, so it cannot be attributed to
+        # a subject; a restricted viewer gets no quality series rather than
+        # somebody else's.
+        "quality": quality_series(con, days=days) if unrestricted else [],
+        "pairs": pair_points(con, tz=tz, subjects=subjects),
     }

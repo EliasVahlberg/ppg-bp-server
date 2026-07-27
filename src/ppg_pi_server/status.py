@@ -128,43 +128,92 @@ def local_timezone(con: duckdb.DuckDBPyConnection) -> str:
     return str(con.execute("SELECT current_setting('TimeZone')").fetchone()[0])
 
 
+def _subject_clause(subjects: tuple[str, ...] | None, column: str) -> tuple[str, list[Any]]:
+    """SQL fragment restricting a query to the viewer's subjects.
+
+    Filtering happens here, in SQL, rather than in the browser. A UI that fetches
+    everything and hides the rest is not access control -- the data has already
+    left the server by then.
+    """
+    if subjects is None or "*" in subjects:
+        return "TRUE", []
+    if not subjects:
+        return "FALSE", []
+    marks = ", ".join("?" for _ in subjects)
+    return f"coalesce({column}, 'unknown') IN ({marks})", list(subjects)
+
+
+def _allowed_session_ids(
+    con: duckdb.DuckDBPyConnection, tables: set[str], subjects: tuple[str, ...] | None
+) -> list[int] | None:
+    """Session ids belonging to the viewer's subjects, or None for unrestricted."""
+    if subjects is None or "*" in subjects or not {"sessions", "uploads"} <= tables:
+        return None
+    clause, params = _subject_clause(subjects, "u.uploader_phone_id")
+    rows = con.execute(
+        f"""
+        SELECT s.id FROM sessions s
+        LEFT JOIN uploads u ON u.phone_session_uuid = s.session_uuid
+        WHERE {clause}
+        """,
+        params,
+    ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
 def collect(
     con: duckdb.DuckDBPyConnection,
     *,
     now: float | None = None,
     timezone: str | None = None,
+    subjects: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Read the store and return the status payload. Read-only."""
+    """Read the store and return the status payload. Read-only.
+
+    ``subjects`` restricts every figure to those uploaders. None or ``("*",)``
+    means unrestricted.
+    """
     now = time.time() if now is None else now
     tz = timezone or local_timezone(con)
     tables = {
         r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()
     }
 
-    def count(table: str, where: str = "") -> int:
+    cuff_where, cuff_where_params = _subject_clause(subjects, "uploader_phone_id")
+
+    def count(table: str, where: str = "", params: list[Any] | None = None) -> int:
         if table not in tables:
             return 0
-        return int(con.execute(f'SELECT count(*) FROM "{table}" {where}').fetchone()[0])
+        return int(
+            con.execute(
+                f'SELECT count(*) FROM "{table}" {where}', params or []
+            ).fetchone()[0]
+        )
 
-    subjects: dict[str, Subject] = {}
+    # Named distinctly from the `subjects` parameter: they are different things,
+    # and shadowing one with the other silently turned every filter into FALSE.
+    found: dict[str, Subject] = {}
 
     def subject(sid: str | None) -> Subject:
         key = sid or "unknown"
-        return subjects.setdefault(key, Subject(subject_id=key))
+        return found.setdefault(key, Subject(subject_id=key))
 
     # -- recordings. sessions has no uploader column, so attribution comes from
     # -- the uploads audit row, which does.
     if {"sessions", "uploads"} <= tables:
+        clause, params = _subject_clause(subjects, "u.uploader_phone_id")
         rows = con.execute(
-            """
+            f"""
             SELECT coalesce(u.uploader_phone_id, 'unknown') AS sid,
                    count(*) AS n,
                    sum(coalesce(s.end_time, s.start_time) - s.start_time) AS secs,
                    max(s.start_time) AS last_start
             FROM sessions s
             LEFT JOIN uploads u ON u.phone_session_uuid = s.session_uuid
+            WHERE {clause}
             GROUP BY 1
-            """
+            """,
+            params,
         ).fetchall()
         for sid, n, secs, last_start in rows:
             s = subject(sid)
@@ -174,8 +223,9 @@ def collect(
 
     # -- cuff readings, with the observed rate over the readings actually held.
     if "cuff_readings" in tables:
+        cuff_clause, cuff_params = _subject_clause(subjects, "uploader_phone_id")
         rows = con.execute(
-            """
+            f"""
             SELECT coalesce(uploader_phone_id, 'unknown') AS sid,
                    count(*) AS n,
                    max(taken_at) AS last_taken,
@@ -183,9 +233,10 @@ def collect(
                    min(epoch(timezone(?, taken_at::TIMESTAMP))) AS first_epoch,
                    max(epoch(timezone(?, taken_at::TIMESTAMP))) AS last_epoch
             FROM cuff_readings
+            WHERE {cuff_clause}
             GROUP BY 1
             """,
-            [tz, tz],
+            [tz, tz, *cuff_params],
         ).fetchall()
         for sid, n, last_taken, last_upload, first_epoch, last_epoch in rows:
             s = subject(sid)
@@ -207,7 +258,8 @@ def collect(
             f"""
             SELECT coalesce(cr.uploader_phone_id, 'unknown') AS sid, count(*) AS n
             FROM cuff_readings cr
-            WHERE coalesce(cr.clock_valid, FALSE)
+            WHERE {cuff_clause}
+              AND coalesce(cr.clock_valid, FALSE)
               AND NOT coalesce(cr.clock_suspect, FALSE)
               AND EXISTS (
                 SELECT 1
@@ -222,12 +274,23 @@ def collect(
               )
             GROUP BY 1
             """,
-            [tz],
+            # Placeholder order: the subject list appears in the WHERE before the
+            # timezone inside the EXISTS clause. Reversing these binds the
+            # timezone as a subject name and reports zero pairs -- which looks
+            # like "no calibration data yet" rather than like a bug.
+            [*cuff_params, tz],
         ).fetchall()
         for sid, n in rows:
             subject(sid).pairs = int(n)
 
-    clock: dict[str, Any] = {"cuff_total": count("cuff_readings")}
+    sids = _allowed_session_ids(con, tables, subjects)
+    sid_clause = "TRUE" if sids is None else (
+        f"session_id IN ({', '.join(str(int(i)) for i in sids)})" if sids else "FALSE"
+    )
+
+    clock: dict[str, Any] = {
+        "cuff_total": count("cuff_readings", f"WHERE {cuff_where}", cuff_where_params)
+    }
     if "cuff_readings" in tables:
         # Two different things must not be conflated. A reading measured and found
         # untrustworthy is actionable: the cuff clock needs setting. A reading that
@@ -236,15 +299,16 @@ def collect(
         # Reporting the second as an error produces a warning that can never be
         # cleared, which teaches the reader to ignore warnings.
         row = con.execute(
-            """
+            f"""
             SELECT sum(CASE WHEN clock_offset_s IS NOT NULL THEN 1 ELSE 0 END),
                    sum(CASE WHEN clock_offset_s IS NOT NULL
                              AND NOT coalesce(clock_valid, FALSE) THEN 1 ELSE 0 END),
                    sum(CASE WHEN clock_offset_s IS NULL THEN 1 ELSE 0 END),
                    sum(CASE WHEN coalesce(clock_suspect, FALSE) THEN 1 ELSE 0 END),
                    max(abs(clock_offset_s))
-            FROM cuff_readings
-            """
+            FROM cuff_readings WHERE {cuff_where}
+            """,
+            cuff_where_params,
         ).fetchone()
         clock.update(
             with_provenance=int(row[0] or 0),
@@ -254,8 +318,11 @@ def collect(
             max_abs_offset_s=float(row[4]) if row[4] is not None else None,
         )
 
+    # derived_ppg_minute carries no uploader column (its label is a session-uuid
+    # prefix), so it cannot be attributed to a subject. Rather than leak another
+    # subject's figures, a restricted viewer simply gets no quality block.
     quality: dict[str, Any] = {"minutes": 0, "good_minutes": 0}
-    if "derived_ppg_minute" in tables:
+    if "derived_ppg_minute" in tables and (subjects is None or "*" in subjects):
         row = con.execute(
             "SELECT count(*), sum(CASE WHEN sqi > 0.8 THEN 1 ELSE 0 END) FROM derived_ppg_minute"
         ).fetchone()
@@ -263,10 +330,12 @@ def collect(
 
     uploads: dict[str, int] = {}
     if "uploads" in tables:
+        up_clause, up_params = _subject_clause(subjects, "uploader_phone_id")
         uploads = {
             str(st): int(n)
             for st, n in con.execute(
-                "SELECT status, count(*) FROM uploads GROUP BY 1"
+                f"SELECT status, count(*) FROM uploads WHERE {up_clause} GROUP BY 1",
+                up_params,
             ).fetchall()
         }
 
@@ -274,40 +343,53 @@ def collect(
         "generated_at": now,
         "timezone": tz,
         "totals": {
-            "sessions": count("sessions"),
-            "ppg_samples": count("ppg"),
-            "acc_samples": count("acc"),
-            "gyro_samples": count("gyro"),
-            "cuff_readings": count("cuff_readings"),
-            "notes": count("notes"),
+            "sessions": (
+                count("sessions") if sids is None
+                else count("sessions", f"WHERE id IN ({_ids(sids)})" if sids else "WHERE FALSE")
+            ),
+            "ppg_samples": count("ppg", f"WHERE {sid_clause}"),
+            "acc_samples": count("acc", f"WHERE {sid_clause}"),
+            "gyro_samples": count("gyro", f"WHERE {sid_clause}"),
+            "cuff_readings": count("cuff_readings", f"WHERE {cuff_where}", cuff_where_params),
+            "notes": count("notes", f"WHERE {sid_clause}"),
         },
         "subjects": [
-            s.as_dict(now) for s in sorted(subjects.values(), key=lambda x: x.subject_id)
+            s.as_dict(now) for s in sorted(found.values(), key=lambda x: x.subject_id)
         ],
         "clock": clock,
         "quality": quality,
         "uploads": uploads,
-        "recent_sessions": _recent_sessions(con, tables),
-        "recent_cuff": _recent_cuff(con, tables),
-        "markers": _markers(con, tables),
+        "recent_sessions": _recent_sessions(con, tables, subjects),
+        "recent_cuff": _recent_cuff(con, tables, subjects),
+        "markers": _markers(con, tables, sid_clause),
+        "scope": list(subjects) if subjects else ["*"],
     }
     payload["warnings"] = assess(payload)
     return payload
 
 
-def _recent_sessions(con: duckdb.DuckDBPyConnection, tables: set[str]) -> list[dict]:
+def _ids(ids: list[int]) -> str:
+    return ", ".join(str(int(i)) for i in ids)
+
+
+def _recent_sessions(
+    con: duckdb.DuckDBPyConnection, tables: set[str], subjects: tuple[str, ...] | None = None
+) -> list[dict]:
     if not {"sessions", "uploads"} <= tables:
         return []
+    clause, params = _subject_clause(subjects, "u.uploader_phone_id")
     rows = con.execute(
-        """
+        f"""
         SELECT s.id, s.session_uuid, s.start_time, s.end_time, s.device_name,
                coalesce(u.uploader_phone_id, 'unknown') AS subject_id, u.status,
                (SELECT count(*) FROM notes n WHERE n.session_id = s.id) AS notes
         FROM sessions s
         LEFT JOIN uploads u ON u.phone_session_uuid = s.session_uuid
+        WHERE {clause}
         ORDER BY s.start_time DESC
         LIMIT 15
-        """
+        """,
+        params,
     ).fetchall()
     return [
         {
@@ -324,16 +406,20 @@ def _recent_sessions(con: duckdb.DuckDBPyConnection, tables: set[str]) -> list[d
     ]
 
 
-def _recent_cuff(con: duckdb.DuckDBPyConnection, tables: set[str]) -> list[dict]:
+def _recent_cuff(
+    con: duckdb.DuckDBPyConnection, tables: set[str], subjects: tuple[str, ...] | None = None
+) -> list[dict]:
     if "cuff_readings" not in tables:
         return []
+    clause, params = _subject_clause(subjects, "uploader_phone_id")
     rows = con.execute(
-        """
+        f"""
         SELECT taken_at, sys, dia, pulse, coalesce(uploader_phone_id, 'unknown'),
                clock_offset_s, coalesce(clock_valid, FALSE), coalesce(clock_suspect, FALSE),
                coalesce(ihb, FALSE), coalesce(mov, FALSE)
-        FROM cuff_readings ORDER BY taken_at DESC LIMIT 15
-        """
+        FROM cuff_readings WHERE {clause} ORDER BY taken_at DESC LIMIT 15
+        """,
+        params,
     ).fetchall()
     return [
         {
@@ -352,18 +438,21 @@ def _recent_cuff(con: duckdb.DuckDBPyConnection, tables: set[str]) -> list[dict]
     ]
 
 
-def _markers(con: duckdb.DuckDBPyConnection, tables: set[str]) -> list[dict]:
+def _markers(
+    con: duckdb.DuckDBPyConnection, tables: set[str], sid_clause: str = "TRUE"
+) -> list[dict]:
     """Calibration session delimiters written by the app (ppg-bp-android)."""
     if "notes" not in tables:
         return []
     rows = con.execute(
-        """
+        f"""
         SELECT session_id, ts,
                json_extract_string(note, '$.event'),
                json_extract_string(note, '$.name'),
                json_extract(note, '$.tags')::VARCHAR
         FROM notes
-        WHERE json_extract_string(note, '$.event') IN
+        WHERE {sid_clause}
+          AND json_extract_string(note, '$.event') IN
               ('calibration_start', 'calibration_stop')
         ORDER BY ts DESC LIMIT 20
         """

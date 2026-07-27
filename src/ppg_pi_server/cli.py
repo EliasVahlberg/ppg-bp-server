@@ -24,9 +24,16 @@ from .schema import init_audit_schema
 
 def _cmd_token_add(args) -> int:
     settings = get_settings()
-    token = add_token(settings, args.phone_id, token=args.token, scope=args.scope)
+    token = add_token(
+        settings,
+        args.phone_id,
+        token=args.token,
+        scope=args.scope,
+        subjects=args.subject or None,
+    )
     print(f"Phone:  {args.phone_id}")
     print(f"Scope:  {args.scope}")
+    print(f"Sees:   {', '.join(args.subject) if args.subject else 'all subjects'}")
     print(f"Token:  {token}")
     print()
     print(f"Stored in {settings.tokens_file}.")
@@ -96,6 +103,14 @@ def main(argv: list[str] | None = None) -> int:
     add = token_sub.add_parser("add", help="Add a bearer token for a phone")
     add.add_argument("phone_id", help="Identifier for the phone (e.g. phone-01)")
     add.add_argument("--token", help="Use a specific token (default: random)")
+    add.add_argument(
+        "--subject",
+        action="append",
+        help=(
+            "Restrict this token to one subject (an uploader phone id). Repeat "
+            "for several. Omit to see every subject."
+        ),
+    )
     add.add_argument(
         "--scope",
         choices=["write", "read"],

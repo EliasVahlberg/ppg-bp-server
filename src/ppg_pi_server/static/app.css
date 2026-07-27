@@ -212,3 +212,35 @@ footer { margin-top: var(--lg); padding-top: var(--sm); border-top: 1px solid va
   .tile .v { font-size: 1.1rem; }
   h1 { font-size: 1.2rem; }
 }
+
+/* --- phone-first refinements --------------------------------------------- */
+
+/* Explanations are behind a "?" per card, so the chart is the first thing on
+   screen rather than the third. */
+.card-head { display: flex; align-items: center; gap: var(--sm); margin-bottom: var(--sm); }
+.card-head h3 { margin: 0; flex: 1; }
+button.why {
+  min-height: 32px;
+  min-width: 32px;
+  padding: 0;
+  border-radius: 50%;
+  font-weight: 700;
+  color: var(--on-surface-variant);
+  line-height: 1;
+}
+.card .note { margin: var(--sm) 0 0; }
+
+.sub-detail { color: var(--on-surface-variant); font-size: 0.8rem; margin: var(--sm) 0 0; }
+.scope { color: var(--green); font-weight: 700; }
+.range-row { display: flex; align-items: center; gap: var(--sm); margin-bottom: var(--md); }
+.range-row label { margin: 0; color: var(--on-surface-variant); font-weight: 400; font-size: 0.85rem; }
+
+/* Two tiles per row on a phone, so the numbers stay large enough to read at a
+   glance instead of shrinking to fit four columns. */
+@media (max-width: 34rem) {
+  .tiles { grid-template-columns: repeat(2, 1fr); }
+  .tile .v { font-size: 1.2rem; }
+  .card { padding: var(--sm) var(--md) var(--md); }
+  body { padding: 0 var(--sm) var(--lg); }
+  .legend { gap: var(--sm); font-size: 0.75rem; }
+}

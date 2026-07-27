@@ -20,7 +20,14 @@ const C = {
   dim: "#B7C2BC",
 };
 
-const PAD = { l: 46, r: 12, t: 12, b: 28 };
+const PAD = { l: 38, r: 10, t: 10, b: 24 };
+
+/* Fewer gridlines on a narrow screen: dense ticks turn into a grey haze at
+   phone width, and the shape of the data is what matters here, not reading
+   values off the axis. */
+const NARROW = typeof window !== "undefined" && window.innerWidth < 560;
+const XT = NARROW ? 3 : 4;
+const YT = NARROW ? 4 : 5;
 
 function svgEl(w, h, label) {
   return (
@@ -105,20 +112,64 @@ const dayFmt = (ts) =>
 
 /* ---------------------------------------------------------------- BP trend */
 
+/* Beyond this many points a per-reading chart is noise on a phone: three
+   readings a day for two months is 180 spikes in 300 pixels. Longer windows are
+   summarised per day instead. */
+const BP_DETAIL_LIMIT = 40;
+
+/* Median rather than mean: a single failed or interrupted cuff reading is a real
+   and frequent event in this patient's data, and the mean would drag the day's
+   summary toward it. */
+function median(values) {
+  const v = values.slice().sort((a, b) => a - b);
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
+/* Collapse readings into one entry per local calendar day, keeping the spread.
+   The spread is not decoration here: within-day variability is itself the
+   strongest BP-related mortality predictor in MSA, so flattening it to a mean
+   would discard the most clinically interesting part of the day. */
+function byDay(points) {
+  const groups = new Map();
+  points.forEach((p) => {
+    const d = new Date(p.ts * 1000);
+    const key = d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  });
+  return [...groups.values()].map((g) => ({
+    ts: g[Math.floor(g.length / 2)].ts,
+    sys: median(g.map((p) => p.sys)),
+    dia: median(g.map((p) => p.dia)),
+    sysLo: Math.min(...g.map((p) => p.sys)),
+    sysHi: Math.max(...g.map((p) => p.sys)),
+    pulse: median(g.map((p) => p.pulse)),
+    n: g.length,
+    anyLow: g.some((p) => p.sys < 90),
+  })).sort((a, b) => a.ts - b.ts);
+}
+
 /* Systolic and diastolic as separate series with a shaded band between them:
    the gap is pulse pressure, which is worth seeing directly rather than
    inferring from two lines. */
-function bpTrend(points, h) {
+function bpTrend(rawPoints, h) {
+  const aggregated = rawPoints.length > BP_DETAIL_LIMIT;
+  const points = aggregated ? byDay(rawPoints) : rawPoints;
+  return bpTrendDraw(points, h, aggregated);
+}
+
+function bpTrendDraw(points, h, aggregated) {
   h = h || 240;
   const w = 640;
   if (!points.length) return emptyChart("No cuff readings in this window.");
   const t0 = points[0].ts, t1 = points[points.length - 1].ts;
-  const lo = Math.min.apply(null, points.map((p) => p.dia)) - 8;
-  const hi = Math.max.apply(null, points.map((p) => p.sys)) + 8;
+  const lo = Math.min.apply(null, points.map((p) => Math.min(p.dia, p.sysLo || p.dia))) - 8;
+  const hi = Math.max.apply(null, points.map((p) => Math.max(p.sys, p.sysHi || p.sys))) + 8;
   const xs = scale(t0, t1, PAD.l, w - PAD.r);
   const ys = scale(lo, hi, h - PAD.b, PAD.t);
-  const yT = niceTicks(lo, hi, 5);
-  const xT = niceTicks(t0, t1, 4);
+  const yT = niceTicks(lo, hi, YT);
+  const xT = niceTicks(t0, t1, XT);
 
   let s = svgEl(w, h, "Blood pressure over time, systolic and diastolic, from the cuff");
   s += axes(w, h, xs, ys, xT, yT, dayFmt, (v) => v.toFixed(0));
@@ -133,6 +184,17 @@ function bpTrend(points, h) {
   }
 
   const segs = segments(points, CUFF_GAP_S);
+  if (aggregated) {
+    // Each day's full systolic spread as a vertical whisker, so a calm day and a
+    // day swinging 40 mmHg do not look the same.
+    points.forEach((p) => {
+      s += '<line x1="' + xs(p.ts).toFixed(1) + '" y1="' + ys(p.sysHi).toFixed(1) +
+           '" x2="' + xs(p.ts).toFixed(1) + '" y2="' + ys(p.sysLo).toFixed(1) +
+           '" stroke="' + C.green + '" stroke-width="2" opacity="0.30"><title>' +
+           esc(new Date(p.ts * 1000).toLocaleDateString("sv-SE") + ": " + p.n +
+               " readings, systolic " + p.sysLo + " to " + p.sysHi) + "</title></line>";
+    });
+  }
   segs.forEach((seg) => {
     if (seg.length > 1) {
       const band =
@@ -146,20 +208,25 @@ function bpTrend(points, h) {
              seg.map((p) => xs(p.ts).toFixed(1) + "," + ys(p[k]).toFixed(1)).join(" ") + '"/>';
       }
       seg.forEach((p) => {
-        const flag = k === "sys" && p.sys < 90;
+        const flag = k === "sys" && (p.anyLow !== undefined ? p.anyLow : p.sys < 90);
         s += '<circle cx="' + xs(p.ts).toFixed(1) + '" cy="' + ys(p[k]).toFixed(1) +
-             '" r="' + (flag ? 3.4 : 2.2) + '" fill="' + (flag ? C.red : col) + '"><title>' +
-             esc(new Date(p.ts * 1000).toLocaleString("sv-SE") + "  " + p.sys + "/" + p.dia +
-                 " mmHg, pulse " + p.pulse) + "</title></circle>";
+             '" r="' + (flag ? (NARROW ? 4.2 : 3.4) : (NARROW ? 3 : 2.2)) + '" fill="' + (flag ? C.red : col) + '"><title>' +
+             esc(
+               aggregated
+                 ? new Date(p.ts * 1000).toLocaleDateString("sv-SE") + "  median " +
+                   p.sys + "/" + p.dia + " mmHg from " + p.n + " readings"
+                 : new Date(p.ts * 1000).toLocaleString("sv-SE") + "  " + p.sys + "/" +
+                   p.dia + " mmHg, pulse " + p.pulse
+             ) + "</title></circle>";
       });
     });
   });
   s += "</svg>";
   return s + legend([
-    { color: C.green, label: "Systolic" },
-    { color: C.sage, label: "Diastolic" },
-    { color: C.red, label: "Below 90 mmHg" },
-    { color: C.outline, label: segs.length > 1 ? segs.length + " runs, gaps not bridged" : "" },
+    { color: C.green, label: aggregated ? "Systolic (daily median)" : "Systolic" },
+    { color: C.sage, label: aggregated ? "Diastolic (daily median)" : "Diastolic" },
+    { color: C.red, label: "Below 90" },
+    { color: C.green, label: aggregated ? "Daily range" : "" },
   ].filter((i) => i.label));
 }
 
@@ -178,7 +245,7 @@ function diurnal(points, h) {
   const xs = scale(0, 24, PAD.l, w - PAD.r);
   const ys = scale(lo, hi, h - PAD.b, PAD.t);
   let s = svgEl(w, h, "Systolic and diastolic pressure by hour of day");
-  s += axes(w, h, xs, ys, [0, 6, 12, 18, 24], niceTicks(lo, hi, 5),
+  s += axes(w, h, xs, ys, NARROW ? [0, 12, 24] : [0, 6, 12, 18, 24], niceTicks(lo, hi, YT),
             (v) => String(v).padStart(2, "0"), (v) => v.toFixed(0));
   points.forEach((p) => {
     const d = new Date(p.ts * 1000);
@@ -243,7 +310,7 @@ function coverage(rows, days, h) {
            '" r="' + Math.min(5, 2 + e.cuff * 0.5).toFixed(1) + '" fill="' + C.amber + '"><title>' +
            esc(d + ": " + e.cuff + " cuff readings") + "</title></circle>";
     }
-    if (i % Math.ceil(labels.length / 8) === 0) {
+    if (i % Math.ceil(labels.length / (NARROW ? 4 : 8)) === 0) {
       s += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (h - PAD.b + 16) +
            '" text-anchor="middle" class="tick">' + esc(d.slice(5)) + "</text>";
     }
@@ -268,7 +335,7 @@ function quality(rows, h) {
   const xs = scale(t0, t1, PAD.l, w - PAD.r);
   const ys = scale(0, 1, h - PAD.b, PAD.t);
   let s = svgEl(w, h, "PPG signal quality index over time, with the 0.8 usability threshold");
-  s += axes(w, h, xs, ys, niceTicks(t0, t1, 4), [0, 0.25, 0.5, 0.75, 1],
+  s += axes(w, h, xs, ys, niceTicks(t0, t1, XT), NARROW ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1],
             dayFmt, (v) => v.toFixed(2));
   s += '<line x1="' + PAD.l + '" y1="' + ys(0.8) + '" x2="' + (w - PAD.r) + '" y2="' + ys(0.8) +
        '" stroke="' + C.amber + '" stroke-width="1" stroke-dasharray="4 3"/>';
@@ -318,7 +385,7 @@ function pairs(rows, h) {
   const xs = scale(lo, hi, PAD.l, w - PAD.r);
   const ys = scale(lo, hi, h - PAD.b, PAD.t);
   let s = svgEl(w, h, "PPG heart rate against cuff pulse for paired measurements");
-  s += axes(w, h, xs, ys, niceTicks(lo, hi, 4), niceTicks(lo, hi, 4),
+  s += axes(w, h, xs, ys, niceTicks(lo, hi, XT), niceTicks(lo, hi, XT),
             (v) => v.toFixed(0), (v) => v.toFixed(0));
   // Identity line: agreement means points sit on it.
   s += '<line x1="' + xs(lo) + '" y1="' + ys(lo) + '" x2="' + xs(hi) + '" y2="' + ys(hi) +

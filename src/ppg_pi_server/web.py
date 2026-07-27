@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from . import series as series_mod
 from . import status as status_mod
 from .auth import SESSION_COOKIE, require_viewer, resolve_token
+from .identity import Viewer
 from .config import Settings, get_settings
 
 logger = logging.getLogger("ppg_pi_server.web")
@@ -85,21 +86,24 @@ def _read_only_connection(settings: Settings) -> duckdb.DuckDBPyConnection:
 
 @router.get("/api/v1/status")
 async def api_status(
-    viewer: Annotated[dict, Depends(require_viewer)],
+    viewer: Annotated[Viewer, Depends(require_viewer)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> JSONResponse:
     con = _read_only_connection(settings)
     try:
-        payload = status_mod.collect(con, timezone=settings.local_timezone)
+        payload = status_mod.collect(
+            con, timezone=settings.local_timezone, subjects=viewer.subjects
+        )
     finally:
         con.close()
-    payload["viewer"] = viewer.get("phone_id")
+    payload["viewer"] = viewer.name
+    payload["viewer_method"] = viewer.method
     return JSONResponse(content=payload)
 
 
 @router.get("/api/v1/series")
 async def api_series(
-    viewer: Annotated[dict, Depends(require_viewer)],
+    viewer: Annotated[Viewer, Depends(require_viewer)],
     settings: Annotated[Settings, Depends(get_settings)],
     days: int = 60,
 ) -> JSONResponse:
@@ -108,7 +112,9 @@ async def api_series(
     days = max(1, min(int(days), 730))
     con = _read_only_connection(settings)
     try:
-        payload = series_mod.collect(con, timezone=settings.local_timezone, days=days)
+        payload = series_mod.collect(
+            con, timezone=settings.local_timezone, days=days, subjects=viewer.subjects
+        )
     finally:
         con.close()
     return JSONResponse(content=payload)

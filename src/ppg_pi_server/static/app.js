@@ -40,9 +40,9 @@ function tile(key, value, sub, state) {
 const DAY = 86400;
 
 function renderSubject(s) {
-  /* Thresholds mirror status.py rather than inventing new ones. Two sources of
-     truth for "is this stale" would eventually disagree, and the version the
-     user sees is the one that matters. */
+  /* Four tiles, not six. Each one is something that can prompt an action:
+     is data still arriving, is the cuff about to overwrite, is there enough
+     calibration data. Thresholds mirror status.py so the two cannot disagree. */
   const recAge = s.last_session_age_s;
   const recState = recAge === null ? "warn" : recAge > 2 * DAY ? "error" : "ok";
   const cuffAge = s.last_cuff_transfer_age_s;
@@ -52,15 +52,18 @@ function renderSubject(s) {
   const pairState = s.pairs === 0 ? "warn" : s.pairs < 20 ? "" : "ok";
 
   return (
-    '<div class="subject"><h3>Subject <span class="who">' + s.subject_id + "</span></h3>" +
+    '<div class="subject">' +
+    (s.subject_id ? '<h3><span class="who">' + s.subject_id + "</span></h3>" : "") +
     '<div class="tiles">' +
     tile("Last recording", fmtAge(recAge), "", recState) +
-    tile("Recordings", fmtInt(s.sessions), s.recorded_hours + " h", "") +
-    tile("Last cuff transfer", fmtAge(cuffAge), "", cuffState) +
-    tile("Cuff readings held", fmtInt(s.cuff_readings), s.cuff_per_day ? s.cuff_per_day + "/day" : "", "") +
-    tile("Est. unsynced on cuff", est === null ? "-" : "~" + est, "of 100 slots", estState) +
-    tile("Calibration pairs", fmtInt(s.pairs), "target 20", pairState) +
-    "</div></div>"
+    tile("Last cuff sync", fmtAge(cuffAge), "", cuffState) +
+    tile("Cuff buffer", est === null ? "-" : "~" + Math.round(est), "of 100", estState) +
+    tile("Pairs", fmtInt(s.pairs), "of 20", pairState) +
+    "</div>" +
+    '<p class="sub-detail">' + fmtInt(s.sessions) + " recordings, " + s.recorded_hours +
+    " h. " + fmtInt(s.cuff_readings) + " cuff readings" +
+    (s.cuff_per_day ? " at " + s.cuff_per_day + "/day" : "") + ".</p>" +
+    "</div>"
   );
 }
 
@@ -140,17 +143,23 @@ async function loadCharts() {
   }
 }
 
-function card(title, note, body) {
+function card(title, body, why) {
+  /* Explanations live behind a per-card toggle rather than above every chart.
+     On a phone, three lines of preamble push the chart itself off the screen, and
+     a chart that needs a paragraph to be read is usually the wrong chart. */
   return (
-    '<div class="card"><h3>' + title + "</h3>" +
-    (note ? '<p class="note">' + note + "</p>" : "") + body + "</div>"
+    '<div class="card"><div class="card-head"><h3>' + title + "</h3>" +
+    (why ? '<button class="why" type="button" aria-expanded="false" ' +
+           'aria-label="About this chart">?</button>' : "") +
+    "</div>" + body +
+    (why ? '<p class="note" hidden>' + why + "</p>" : "") +
+    "</div>"
   );
 }
 
 function renderCharts(d, days) {
-  /* One set of charts per subject. Merging subjects would produce a plausible
-     line that means nothing, and a chart is where that mistake stops being
-     visible. */
+  /* One set per subject. Merging subjects would draw a plausible line that means
+     nothing, and a chart is where that mistake stops being visible. */
   const subjects = [...new Set(d.cuff.map((p) => p.subject_id))];
   if (!subjects.length) subjects.push(null);
 
@@ -159,38 +168,35 @@ function renderCharts(d, days) {
     const cuff = sid ? d.cuff.filter((p) => p.subject_id === sid) : [];
     const pairs = sid ? d.pairs.filter((p) => p.subject_id === sid) : d.pairs;
     const cov = sid ? d.coverage.filter((p) => p.subject_id === sid) : d.coverage;
-    if (subjects.length > 1) html += "<h2>Subject " + sid + "</h2>";
-    html += card(
-      "Blood pressure (cuff)",
-      "Measured with the oscillometric cuff, the only pressure reference in this project.",
-      Charts.bpTrend(cuff)
-    );
-    html += card(
-      "By hour of day",
-      "Pump setting and time of day are entangled in this dataset, so a difference " +
-        "between settings may be a difference between morning and afternoon.",
-      Charts.diurnal(cuff)
-    );
-    html += card(
-      "Collection coverage",
-      "Minutes recorded per day, with cuff readings marked. Empty days are the point.",
-      Charts.coverage(cov, Math.min(days, 30))
-    );
-    html += card(
-      "Calibration pairs",
+    if (subjects.length > 1) html += "<h2>" + sid + "</h2>";
+    html += card("Blood pressure", Charts.bpTrend(cuff),
+      "Cuff readings only. The cuff is the sole pressure reference here; no value " +
+      "on this page is estimated from PPG.");
+    html += card("By hour", Charts.diurnal(cuff),
+      "Pump setting and time of day are entangled in this data, so a difference " +
+      "between settings may really be morning versus afternoon.");
+    html += card("Coverage", Charts.coverage(cov, Math.min(days, 30)),
+      "Minutes recorded per day, cuff readings marked above. Empty days are shown " +
+      "deliberately.");
+    html += card("Pairs", Charts.pairs(pairs),
       "PPG heart rate against cuff pulse for readings taken during a recording. A " +
-        "sanity check that both instruments saw the same person at the same time, " +
-        "not a calibration curve.",
-      Charts.pairs(pairs)
-    );
+      "check that both instruments saw the same person at the same time, not a " +
+      "calibration curve.");
   });
-  html += card(
-    "PPG signal quality",
-    "Hourly mean signal quality index and, on hover, the PPG heart rate. No blood " +
-      "pressure is estimated from PPG here.",
-    Charts.quality(d.quality)
-  );
+  if (d.quality.length) {
+    html += card("Signal quality", Charts.quality(d.quality),
+      "Hourly mean signal quality index. Above 0.8 is usable for analysis.");
+  }
   el("charts").innerHTML = html;
+
+  el("charts").querySelectorAll("button.why").forEach((b) => {
+    b.addEventListener("click", () => {
+      const note = b.closest(".card").querySelector(".note");
+      const open = !note.hidden;
+      note.hidden = open;
+      b.setAttribute("aria-expanded", String(!open));
+    });
+  });
 }
 
 function render(d, stale) {
@@ -208,6 +214,8 @@ function render(d, stale) {
     "Store: " + fmtInt(t.sessions) + " recordings, " + fmtInt(t.ppg_samples) + " PPG samples, " +
     fmtInt(t.cuff_readings) + " cuff readings, " + fmtInt(t.notes) + " notes." + legacy +
     (d.viewer ? " Signed in as " + d.viewer + "." : "");
+  const scope = d.scope && d.scope[0] !== "*" ? d.scope.join(", ") : null;
+  el("scope").textContent = scope ? "Showing " + scope : "";
   el("updated").innerHTML = stale
     ? '<span class="stale">Stale — last update ' + fmtClock(lastAt / 1000) + "</span>"
     : "Updated " + fmtClock(Date.now() / 1000);

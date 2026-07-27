@@ -81,6 +81,27 @@ class Settings(BaseSettings):
         description="Maximum upload size per request. ~200MB == 1h of calibration profile compressed.",
     )
 
+    tailnet_identity: bool = Field(
+        default=False,
+        description=(
+            "If True, a caller with no token is identified by resolving its "
+            "tailnet source address through the local tailscaled (tailscale "
+            "whois) and looking the login up in subject_access. Lets a patient "
+            "open the page with no token to paste. Off by default because it "
+            "only makes sense when the server is reachable solely over "
+            "Tailscale."
+        ),
+    )
+    subject_access: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            'Tailscale login to subject grant, e.g. {"you@github": ["*"], '
+            '"her@example.com": ["maggie-phone"]}. Deny by default: an unlisted '
+            "login sees nothing. Set as JSON in "
+            "PPG_PI_SERVER_SUBJECT_ACCESS."
+        ),
+    )
+
     local_timezone: str | None = Field(
         default=None,
         description=(
