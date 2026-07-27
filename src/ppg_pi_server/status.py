@@ -712,48 +712,58 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def _why_no_pairs(s: dict[str, Any]) -> str:
     """Name the most likely cause of zero pairs for one subject.
 
-    Ordered by what has to be fixed first. A clock that was never read blocks
-    pairing regardless of timing, so it outranks a reading that merely fell
-    outside a recording.
+    Reports the largest group rather than the first one found. Against the live
+    store an earlier fixed ordering led with 4 readings that lacked a clock offset
+    while the real story was the 100 that were taken outside any recording -- true,
+    but pointing at the wrong fix.
+
+    Clock problems still win a tie, because a missing or rejected offset blocks
+    pairing no matter when the reading was taken.
     """
     u = s.get("unpaired", {})
     if not s.get("cuff_readings"):
         return "No cuff readings yet."
     if not s.get("sessions"):
         return "No recordings yet, so there is nothing for a reading to fall inside."
-    if u.get("clock_never_read"):
+
+    never = u.get("clock_never_read", 0)
+    bad = u.get("clock_invalid", 0) + u.get("clock_suspect", 0)
+    outside = u.get("no_overlap", 0)
+
+    if never and never >= outside:
         return (
-            f"{u['clock_never_read']} readings have no cuff clock offset. Run a cuff "
-            "sync so the offset is measured, otherwise nothing can be paired."
+            f"{never} readings have no cuff clock offset. Run a cuff sync so the "
+            "offset is measured, otherwise nothing can be paired."
         )
-    if u.get("clock_suspect") or u.get("clock_invalid"):
-        n = u.get("clock_suspect", 0) + u.get("clock_invalid", 0)
+    if bad and bad >= outside:
         return (
-            f"{n} readings have an untrustworthy cuff clock, so their time cannot be "
-            "trusted against a recording."
+            f"{bad} readings have an untrustworthy cuff clock, so their time cannot "
+            "be trusted against a recording."
         )
-    miss = s.get("nearest_miss_s")
-    if miss is None:
+    if not outside:
         return "No cuff reading falls inside a recording."
+
+    miss = s.get("nearest_miss_s")
+    lead = f"{outside} readings fall outside every recording"
+    if miss is None:
+        return lead + "."
     mins = miss / 60.0
     # A near-exact whole number of hours is the signature of a clock or timezone
     # fault rather than of mistimed measurements, and the two need opposite fixes.
     off_hour = abs(miss - round(miss / 3600.0) * 3600.0)
-    if miss > 1800 and off_hour < 120 and miss >= 3540:
+    if miss >= 3540 and off_hour < 120:
         hours = round(miss / 3600.0)
         return (
-            f"Closest reading misses a recording by almost exactly {hours} h. That "
-            "is a clock or timezone fault, not mistimed measurements."
+            f"{lead}, the closest by almost exactly {hours} h. That is a clock or "
+            "timezone fault, not mistimed measurements."
         )
     if mins < 30:
         return (
-            f"Closest reading misses a recording by {mins:.0f} min. Take the cuff "
-            "reading while the recording is running."
+            f"{lead}, the closest by {mins:.0f} min. Take the cuff reading while "
+            "the recording is running."
         )
-    return (
-        f"Closest reading is {_days(miss) if miss >= 86400 else f'{mins / 60:.1f} h'} "
-        "from any recording."
-    )
+    gap = _days(miss) if miss >= 86400 else f"{mins / 60:.1f} h"
+    return f"{lead}, the closest by {gap}. Record and measure at the same time."
 
 
 def _days(seconds: float) -> str:

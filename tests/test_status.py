@@ -411,6 +411,22 @@ def test_asset_route_refuses_path_traversal(client):
 # is the only moment when the run can be repeated.
 
 
+def test_no_pairs_reports_the_largest_group_not_the_first_one_found():
+    """Against the live store, a fixed ordering led with 4 readings lacking a clock
+    offset while 100 had simply been taken outside any recording. True, but it
+    pointed at the wrong fix."""
+    msg = st._why_no_pairs(
+        {
+            "cuff_readings": 104,
+            "sessions": 60,
+            "unpaired": {"no_overlap": 100, "clock_never_read": 4},
+            "nearest_miss_s": 4685.0,
+        }
+    )
+    assert "100 readings fall outside" in msg
+    assert "cuff sync" not in msg
+
+
 def test_no_pairs_names_a_missing_cuff_clock_first():
     """A clock that was never read blocks pairing regardless of timing, so it
     outranks any complaint about when the reading was taken."""
@@ -418,11 +434,11 @@ def test_no_pairs_names_a_missing_cuff_clock_first():
         {
             "cuff_readings": 6,
             "sessions": 2,
-            "unpaired": {"clock_never_read": 6, "no_overlap": 0},
+            "unpaired": {"clock_never_read": 5, "no_overlap": 1},
             "nearest_miss_s": 30.0,
         }
     )
-    assert "cuff sync" in msg and "6" in msg
+    assert "cuff sync" in msg and "5" in msg
 
 
 def test_no_pairs_distinguishes_a_clock_fault_from_mistimed_measurements():
@@ -430,12 +446,22 @@ def test_no_pairs_distinguishes_a_clock_fault_from_mistimed_measurements():
     measurements miss by minutes. The two need opposite fixes, so the message must
     not be the same."""
     clock_fault = st._why_no_pairs(
-        {"cuff_readings": 6, "sessions": 2, "unpaired": {}, "nearest_miss_s": 7205.0}
+        {
+            "cuff_readings": 6,
+            "sessions": 2,
+            "unpaired": {"no_overlap": 6},
+            "nearest_miss_s": 7205.0,
+        }
     )
     assert "clock or timezone" in clock_fault and "2 h" in clock_fault
 
     mistimed = st._why_no_pairs(
-        {"cuff_readings": 6, "sessions": 2, "unpaired": {}, "nearest_miss_s": 480.0}
+        {
+            "cuff_readings": 6,
+            "sessions": 2,
+            "unpaired": {"no_overlap": 6},
+            "nearest_miss_s": 480.0,
+        }
     )
     assert "while the recording is running" in mistimed
     assert "timezone" not in mistimed
