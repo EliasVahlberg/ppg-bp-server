@@ -201,6 +201,15 @@ th { background: var(--surface-variant); color: var(--on-surface-variant); font-
 td.num { text-align: right; }
 .flag { color: var(--red); font-weight: 700; }
 .stale { color: var(--amber); font-weight: 700; }
+.hint { color: var(--on-surface-variant); font-size: 0.8rem; margin: 0 0 var(--sm); }
+
+/* Clickable session rows: a tappable row needs an obvious affordance and a
+   large enough target, same reasoning as the phone-first tap targets below. */
+tr.session-row { cursor: pointer; }
+tr.session-row:hover, tr.session-row:focus-visible { background: var(--surface-variant); }
+tr.session-row td { min-height: 32px; }
+
+#waveform-detail h3 { margin: var(--md) 0 var(--sm); }
 
 details { background: var(--surface); border: 1px solid var(--outline); border-radius: var(--r-md); padding: var(--sm) var(--md); margin-bottom: var(--md); }
 summary { cursor: pointer; font-weight: 700; padding: var(--xs) 0; min-height: 32px; }

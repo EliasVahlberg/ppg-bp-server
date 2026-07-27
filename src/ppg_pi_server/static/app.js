@@ -107,7 +107,8 @@ function renderTables(d) {
   const sessions = d.recent_sessions
     .map(
       (s) =>
-        "<tr><td>" + s.id + "</td><td>" + fmtClock(s.start_time) + "</td>" +
+        '<tr class="session-row" data-session-id="' + s.id + '" tabindex="0">' +
+        "<td>" + s.id + "</td><td>" + fmtClock(s.start_time) + "</td>" +
         '<td class="num">' + (s.duration_s ? Math.round(s.duration_s / 60) + " min" : "-") + "</td>" +
         "<td>" + (s.subject_id || "-") + "</td><td>" + (s.status || "-") + "</td>" +
         '<td class="num">' + s.notes + "</td></tr>"
@@ -144,11 +145,87 @@ function renderTables(d) {
   return (
     "<table><caption>Recent recordings</caption><tr><th>ID</th><th>Started</th><th>Length</th>" +
     "<th>Subject</th><th>Status</th><th>Notes</th></tr>" + sessions + "</table>" +
+    '<p class="hint">Tap a recording above to see its raw PPG, motion and beat-by-beat heart rate.</p>' +
     "<table><caption>Recent cuff readings</caption><tr><th>Taken (cuff clock)</th><th>mmHg</th>" +
     "<th>Pulse</th><th>Subject</th><th>Offset</th><th>Flags</th></tr>" + cuff + "</table>" +
     "<table><caption>Calibration markers</caption><tr><th>Time</th><th>Event</th><th>Name</th>" +
     "<th>Tags</th><th>Session</th></tr>" + markers + "</table>"
   );
+}
+
+/* Wired once after the tables render, rather than re-bound on every refresh
+   poll -- delegated to the container so it survives innerHTML replacement of
+   individual rows without re-attaching a listener per row. */
+function wireSessionRowClicks() {
+  const container = el("tables");
+  if (!container || container._waveformWired) return;
+  container._waveformWired = true;
+  container.addEventListener("click", (e) => {
+    const row = e.target.closest(".session-row");
+    if (row) loadWaveform(parseInt(row.dataset.sessionId, 10));
+  });
+  container.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const row = e.target.closest(".session-row");
+    if (row) {
+      e.preventDefault();
+      loadWaveform(parseInt(row.dataset.sessionId, 10));
+    }
+  });
+}
+
+/* Fetched on demand per session rather than bundled into /status or /series:
+   a 40-minute recording's PPG is a meaningfully sized payload even downsampled,
+   and most page loads never need it -- only when someone actually taps a row. */
+async function loadWaveform(sessionId) {
+  const target = el("waveform-detail");
+  if (!target) return;
+  target.innerHTML = '<p class="empty">Loading session ' + sessionId + "…</p>";
+  try {
+    const r = await fetch("/api/v1/waveform?session_id=" + sessionId, {
+      credentials: "same-origin",
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    target.innerHTML = renderWaveform(d);
+  } catch (e) {
+    target.innerHTML = '<p class="empty">Could not load session ' + sessionId + ": " + e.message + "</p>";
+  }
+}
+
+function renderWaveform(d) {
+  if (!d.found) {
+    return '<p class="empty">Session not found (or not visible to this token).</p>';
+  }
+  let html = "<h3>Session " + d.session_id + " — " + fmtClock(d.start_time) +
+    (d.device_name ? " · " + d.device_name : "") + "</h3>";
+  html += card(
+    "PPG",
+    Charts.waveform(d.ppg, "ppg"),
+    "Ambient-subtracted, band-limited to the pulse frequency range. The shaded " +
+      "band is the min/max envelope of samples in each pixel column, so real " +
+      "peaks survive downsampling instead of being averaged away.",
+  );
+  html += card(
+    "Heart rate (beat by beat)",
+    Charts.hrDecomposition(d.hr),
+    "One point per detected PPG pulse, not a per-minute average. Scattered or " +
+      "missing points usually mean motion or poor contact, not a real heart-rate " +
+      "swing.",
+  );
+  html += card(
+    "Motion (accelerometer)",
+    Charts.waveform(d.acc, "acc"),
+    "Smoothed magnitude of the 3-axis accelerometer, not the raw axes. Useful for " +
+      "spotting movement during a reading, not for posture classification.",
+  );
+  html += card(
+    "Motion (gyroscope)",
+    Charts.waveform(d.gyro, "gyro"),
+    "Smoothed magnitude of the 3-axis gyroscope, same treatment as the " +
+      "accelerometer above.",
+  );
+  return html;
 }
 
 /* Charts are fetched separately from status: a slow series query must not delay
@@ -226,6 +303,7 @@ function render(d, stale) {
     ? d.subjects.map(renderSubject).join("")
     : "<p>No data uploaded yet.</p>";
   el("tables").innerHTML = renderTables(d);
+  wireSessionRowClicks();
   const c = d.clock || {};
   const legacy = c.no_provenance
     ? " " + c.no_provenance + " cuff readings predate clock provenance."

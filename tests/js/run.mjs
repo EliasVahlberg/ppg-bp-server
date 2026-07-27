@@ -241,5 +241,72 @@ test("nothing unpaired means no line at all", () => {
   assert.equal(unpairedLine({}), "");
 });
 
+// ---------------------------------------------------------------------------
+// waveform / hr decomposition (charts.js)
+// ---------------------------------------------------------------------------
+
+function envelopeSeries(n, { fs_hz = 176, base = 0 } = {}) {
+  const t_s = Array.from({ length: n }, (_, i) => i * 0.1);
+  const lo = Array.from({ length: n }, (_, i) => base - 1 - (i % 3));
+  const hi = Array.from({ length: n }, (_, i) => base + 1 + (i % 3));
+  return { fs_hz, t_s, lo, hi };
+}
+
+test("charts.js exposes waveform and hrDecomposition", () => {
+  const { Charts } = load(["charts.js"]);
+  assert.equal(typeof Charts.waveform, "function");
+  assert.equal(typeof Charts.hrDecomposition, "function");
+});
+
+test("waveform renders an envelope band for ppg/acc/gyro", () => {
+  const { Charts } = load(["charts.js"]);
+  for (const kind of ["ppg", "acc", "gyro"]) {
+    const svg = Charts.waveform(envelopeSeries(50), kind);
+    assert.match(svg, /<svg/);
+    assert.match(svg, /<path/);
+  }
+});
+
+test("waveform with no series shows an empty state instead of a broken chart", () => {
+  const { Charts } = load(["charts.js"]);
+  assert.match(Charts.waveform(null, "ppg"), /empty/);
+  assert.match(Charts.waveform({ t_s: [] }, "acc"), /empty/);
+});
+
+test("waveform legend mentions the sample rate when known", () => {
+  const { Charts } = load(["charts.js"]);
+  const svg = Charts.waveform(envelopeSeries(20, { fs_hz: 176.3 }), "ppg");
+  assert.match(svg, /176\.3 Hz/);
+});
+
+function hrSeries(n, { start = 60, jitter = 5 } = {}) {
+  return {
+    t_s: Array.from({ length: n }, (_, i) => i * 0.8),
+    bpm: Array.from({ length: n }, (_, i) => start + (i % jitter)),
+    n_beats: n + 1,
+    mean_bpm: start + jitter / 2,
+  };
+}
+
+test("hrDecomposition plots one point per beat", () => {
+  const { Charts } = load(["charts.js"]);
+  const svg = Charts.hrDecomposition(hrSeries(30));
+  const circles = svg.match(/<circle/g) || [];
+  assert.equal(circles.length, 30);
+});
+
+test("hrDecomposition with no beats shows an empty state", () => {
+  const { Charts } = load(["charts.js"]);
+  assert.match(Charts.hrDecomposition(null), /empty/);
+  assert.match(Charts.hrDecomposition({ t_s: [] }), /empty/);
+});
+
+test("hrDecomposition legend reports the mean and beat count when given", () => {
+  const { Charts } = load(["charts.js"]);
+  const svg = Charts.hrDecomposition(hrSeries(10, { start: 72 }));
+  assert.match(svg, /mean/);
+  assert.match(svg, /beats/);
+});
+
 console.log((failures ? "FAILED" : "ok") + ": " + passes + " passed, " + failures + " failed");
 process.exit(failures ? 1 : 0);

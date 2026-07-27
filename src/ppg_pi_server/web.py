@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from . import series as series_mod
 from . import status as status_mod
+from . import waveform as waveform_mod
 from .auth import SESSION_COOKIE, require_viewer, resolve_token
 from .identity import Viewer
 from .config import Settings, get_settings
@@ -114,6 +115,34 @@ async def api_series(
     try:
         payload = series_mod.collect(
             con, timezone=settings.local_timezone, days=days, subjects=viewer.subjects
+        )
+    finally:
+        con.close()
+    return JSONResponse(content=payload)
+
+
+@router.get("/api/v1/waveform")
+async def api_waveform(
+    viewer: Annotated[Viewer, Depends(require_viewer)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    session_id: int,
+) -> JSONResponse:
+    """Raw-ish PPG / smoothed ACC+GYRO motion / beat-by-beat HR for one session.
+
+    Scoped the same way /status scopes recent_sessions: allowed_session_ids is
+    None for an unrestricted viewer, otherwise the exact set of session ids that
+    belong to the viewer's subjects. A session_id outside that set is treated as
+    not found rather than forbidden, so the response cannot be used to probe
+    which session ids exist for someone else's data.
+    """
+    con = _read_only_connection(settings)
+    try:
+        tables = {
+            r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()
+        }
+        allowed = status_mod._allowed_session_ids(con, tables, viewer.subjects)
+        payload = waveform_mod.session_waveform(
+            con, session_id=session_id, allowed_session_ids=allowed
         )
     finally:
         con.close()

@@ -407,4 +407,90 @@ function emptyChart(msg) {
   return '<p class="empty">' + esc(msg) + "</p>";
 }
 
-window.Charts = { bpTrend, diurnal, coverage, quality, pairs };
+/* --------------------------------------------------------------- waveform */
+
+/* Elapsed time within a recording, not a wall-clock date -- these charts are
+   minutes long, not weeks, so mm:ss reads better than the day-based ticks the
+   trend charts use. */
+function elapsedFmt(t) {
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  return m + ":" + String(s).padStart(2, "0");
+}
+
+const WAVEFORM_COLOR = { ppg: C.green, acc: C.amber, gyro: C.sage };
+const WAVEFORM_LABEL = {
+  ppg: "PPG (ambient-subtracted, pulse band)",
+  acc: "Accelerometer magnitude (smoothed)",
+  gyro: "Gyroscope magnitude (smoothed)",
+};
+
+/* Shared renderer for the PPG / ACC / GYRO envelope series: each is a min/max
+   band per pixel column rather than a single line, because the server already
+   downsampled by keeping the min and max of every bucket (see
+   waveform._envelope_downsample) -- collapsing that back to one line here would
+   throw away exactly the peak information the server took care to preserve. */
+function waveform(series, kind) {
+  const h = 160;
+  const w = 640;
+  if (!series || !series.t_s || !series.t_s.length) {
+    return emptyChart("No " + kind.toUpperCase() + " data for this recording.");
+  }
+  const t = series.t_s, lo = series.lo, hi = series.hi;
+  const t0 = t[0], t1 = t[t.length - 1];
+  const ylo = Math.min.apply(null, lo);
+  const yhi = Math.max.apply(null, hi);
+  const xs = scale(t0, t1, PAD.l, w - PAD.r);
+  const ys = scale(ylo, yhi, h - PAD.b, PAD.t);
+  const color = WAVEFORM_COLOR[kind] || C.green;
+  let s = svgEl(w, h, WAVEFORM_LABEL[kind] || kind);
+  s += axes(w, h, xs, ys, niceTicks(t0, t1, XT), niceTicks(ylo, yhi, YT), elapsedFmt, (v) => v.toFixed(0));
+  // Envelope band: a filled polygon tracing hi forward then lo backward, so a
+  // single path shows the full min/max spread per pixel column without needing
+  // per-point circles (which would be thousands of them here).
+  let path = "M";
+  for (let i = 0; i < t.length; i++) path += xs(t[i]).toFixed(1) + "," + ys(hi[i]).toFixed(1) + " L";
+  for (let i = t.length - 1; i >= 0; i--) path += xs(t[i]).toFixed(1) + "," + ys(lo[i]).toFixed(1) + " L";
+  path += xs(t[0]).toFixed(1) + "," + ys(hi[0]).toFixed(1) + "Z";
+  s += '<path d="' + path + '" fill="' + color + '" opacity="0.55" stroke="none"/>';
+  s += "</svg>";
+  const fsNote = series.fs_hz ? " (" + series.fs_hz + " Hz)" : "";
+  return s + legend([{ color: color, label: (WAVEFORM_LABEL[kind] || kind) + fsNote }]);
+}
+
+/* ------------------------------------------------------------ hr decomposition */
+
+/* One point per detected beat, not a per-minute mean -- the per-minute figure
+   already exists elsewhere (derived_ppg_minute) and is unavailable to a scoped
+   viewer anyway (no uploader column). This is a different, complementary view:
+   whether individual beats look clean and evenly spaced, which a mean can hide. */
+function hrDecomposition(hr) {
+  const h = 160;
+  const w = 640;
+  if (!hr || !hr.t_s || !hr.t_s.length) {
+    return emptyChart("Not enough clean PPG peaks to compute a heart rate for this recording.");
+  }
+  const t = hr.t_s, bpm = hr.bpm;
+  const t0 = t[0], t1 = t[t.length - 1];
+  const ylo = Math.min.apply(null, bpm) - 3;
+  const yhi = Math.max.apply(null, bpm) + 3;
+  const xs = scale(t0, t1, PAD.l, w - PAD.r);
+  const ys = scale(ylo, yhi, h - PAD.b, PAD.t);
+  let s = svgEl(w, h, "Beat-by-beat heart rate from PPG pulse peaks");
+  s += axes(w, h, xs, ys, niceTicks(t0, t1, XT), niceTicks(ylo, yhi, YT), elapsedFmt, (v) => v.toFixed(0));
+  segments(t.map((tt, i) => ({ ts: tt, bpm: bpm[i] })), 5).forEach((seg) => {
+    if (seg.length > 1) {
+      s += '<polyline fill="none" stroke="' + C.green + '" stroke-width="1" opacity="0.6" points="' +
+           seg.map((r) => xs(r.ts).toFixed(1) + "," + ys(r.bpm).toFixed(1)).join(" ") + '"/>';
+    }
+  });
+  t.forEach((tt, i) => {
+    s += '<circle cx="' + xs(tt).toFixed(1) + '" cy="' + ys(bpm[i]).toFixed(1) +
+         '" r="1.6" fill="' + C.green + '"/>';
+  });
+  s += "</svg>";
+  const meanNote = hr.mean_bpm ? "mean " + hr.mean_bpm + " bpm over " + hr.n_beats + " beats" : "";
+  return s + legend([{ color: C.green, label: "Per-beat HR" + (meanNote ? " (" + meanNote + ")" : "") }]);
+}
+
+window.Charts = { bpTrend, diurnal, coverage, quality, pairs, waveform, hrDecomposition };
