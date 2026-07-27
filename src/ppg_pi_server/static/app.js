@@ -157,7 +157,9 @@ async function load() {
   try {
     const r = await fetch("/api/v1/status", { credentials: "same-origin" });
     if (r.status === 401) return showLogin("");
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    /* 503 means the store is locked by an analysis refresh, not that anything is
+       wrong. Keep the previous numbers on screen, marked stale. */
+    if (!r.ok) throw new Error(r.status === 503 ? "store busy" : "HTTP " + r.status);
     last = await r.json();
     lastAt = Date.now();
     render(last, false);

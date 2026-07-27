@@ -18,6 +18,7 @@ once this is installed as a PWA.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -40,19 +41,45 @@ COOKIE_MAX_AGE_S = 90 * 24 * 3600
 router = APIRouter()
 
 
-def _read_only_connection(settings: Settings) -> duckdb.DuckDBPyConnection:
-    """Open the store read-only.
+#: Retry budget when the store is locked. The analysis refresh
+#: (``process_canonical_store``) holds a write lock for roughly 28 s, and DuckDB
+#: refuses a read-only open from another process while it does, so a status
+#: request landing during a refresh has to wait rather than fail.
+LOCK_RETRY_ATTEMPTS = 8
+LOCK_RETRY_MAX_WAIT_S = 5.0
 
-    A fresh connection per request: DuckDB permits one writer, and read-only
-    connections never contend with the ingest path. At household scale the cost
-    is irrelevant and it removes cross-thread connection sharing entirely.
+
+def _read_only_connection(settings: Settings) -> duckdb.DuckDBPyConnection:
+    """Open the store read-only, waiting out a concurrent writer.
+
+    A fresh connection per request, so nothing is shared across threads. Read-only
+    is deliberate: a status page must not be able to modify the store, and it also
+    means several viewers never contend with each other -- only with an actual
+    writer.
     """
     if not Path(settings.db_path).exists():
         raise HTTPException(503, f"Store not found: {settings.db_path}")
-    try:
-        return duckdb.connect(str(settings.db_path), read_only=True)
-    except duckdb.IOException as exc:  # pragma: no cover - needs a live writer
-        raise HTTPException(503, f"Store busy: {exc}") from exc
+    last: Exception | None = None
+    for attempt in range(LOCK_RETRY_ATTEMPTS):
+        try:
+            return duckdb.connect(str(settings.db_path), read_only=True)
+        except duckdb.IOException as exc:
+            last = exc
+            if attempt == LOCK_RETRY_ATTEMPTS - 1:
+                break
+            wait = min(1.5 * (attempt + 1), LOCK_RETRY_MAX_WAIT_S)
+            logger.info(
+                "status: store locked (attempt %d/%d, retry in %.1fs)",
+                attempt + 1,
+                LOCK_RETRY_ATTEMPTS,
+                wait,
+            )
+            time.sleep(wait)
+    logger.warning("status: store still locked after %d attempts", LOCK_RETRY_ATTEMPTS)
+    raise HTTPException(
+        503,
+        "Store is busy (an analysis refresh is probably running). Try again shortly.",
+    ) from last
 
 
 @router.get("/api/v1/status")
