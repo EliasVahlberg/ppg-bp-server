@@ -55,6 +55,11 @@ PAIR_WINDOW_S = 120.0
 #: Protocol target for a usable calibration set.
 PAIR_TARGET = 20
 
+# An upload that is still open this recently is presumed to be in flight rather
+# than broken. A session bundle is large and takes minutes over the tailnet, and
+# calling that an error mid-session is a false alarm at the worst moment.
+UPLOAD_IN_FLIGHT_S = 15 * 60.0
+
 
 @dataclass
 class Subject:
@@ -69,6 +74,14 @@ class Subject:
     last_cuff_transfer_at: float | None = None
     cuff_per_day: float | None = None
     pairs: int = 0
+    # Why readings did not pair. "Pairs: 0" on its own is not actionable, and the
+    # causes are very different: a mis-set cuff clock, a reading taken outside any
+    # recording, or a clock reading the phone rejected.
+    unpaired_no_overlap: int = 0
+    unpaired_clock_never_read: int = 0
+    unpaired_clock_invalid: int = 0
+    unpaired_clock_suspect: int = 0
+    nearest_miss_s: float | None = None
 
     def as_dict(self, now: float) -> dict[str, Any]:
         d = {
@@ -83,6 +96,16 @@ class Subject:
             "last_cuff_transfer_age_s": _age(self.last_cuff_transfer_at, now),
             "cuff_per_day": self.cuff_per_day,
             "pairs": self.pairs,
+            "unpaired": {
+                "no_overlap": self.unpaired_no_overlap,
+                "clock_never_read": self.unpaired_clock_never_read,
+                "clock_invalid": self.unpaired_clock_invalid,
+                "clock_suspect": self.unpaired_clock_suspect,
+            },
+            # Distance from the closest reading to the nearest recording. The
+            # magnitude names the cause: a few minutes is timing discipline, an
+            # exact whole number of hours is a clock or timezone fault.
+            "nearest_miss_s": self.nearest_miss_s,
         }
         d["estimated_unsynced_cuff"] = estimated_unsynced_cuff(
             self.cuff_per_day, d["last_cuff_transfer_age_s"]
@@ -253,35 +276,71 @@ def collect(
     # -- recording from the same subject. Corrected time is taken_at minus
     # -- clock_offset_s (the offset is cuff-minus-phone), never a rewritten
     # -- timestamp. Readings with an untrustworthy clock cannot be paired.
+    # --
+    # -- The same pass records why the others did not pair. A bare "0 pairs" sends
+    # -- you looking through the database by hand at exactly the moment when the
+    # -- person and the equipment are still in the room and the run could be
+    # -- repeated, so the reason has to be on the page.
     if {"cuff_readings", "sessions", "uploads"} <= tables:
         rows = con.execute(
             f"""
-            SELECT coalesce(cr.uploader_phone_id, 'unknown') AS sid, count(*) AS n
-            FROM cuff_readings cr
-            WHERE {cuff_clause}
-              AND coalesce(cr.clock_valid, FALSE)
-              AND NOT coalesce(cr.clock_suspect, FALSE)
-              AND EXISTS (
-                SELECT 1
-                FROM sessions s
-                LEFT JOIN uploads u ON u.phone_session_uuid = s.session_uuid
-                WHERE coalesce(u.uploader_phone_id, 'unknown')
-                      = coalesce(cr.uploader_phone_id, 'unknown')
-                  AND (epoch(timezone(?, cr.taken_at::TIMESTAMP))
-                       - coalesce(cr.clock_offset_s, 0))
-                      BETWEEN s.start_time - {PAIR_WINDOW_S}
-                          AND coalesce(s.end_time, s.start_time) + {PAIR_WINDOW_S}
-              )
+            WITH r AS (
+                SELECT coalesce(cr.uploader_phone_id, 'unknown') AS sid,
+                       CASE
+                           WHEN cr.clock_offset_s IS NULL THEN 'never_read'
+                           WHEN coalesce(cr.clock_suspect, FALSE) THEN 'suspect'
+                           WHEN NOT coalesce(cr.clock_valid, FALSE) THEN 'invalid'
+                           ELSE 'ok'
+                       END AS clock_state,
+                       epoch(timezone(?, cr.taken_at::TIMESTAMP))
+                           - coalesce(cr.clock_offset_s, 0) AS t
+                FROM cuff_readings cr
+                WHERE {cuff_clause}
+            ),
+            g AS (
+                SELECT r.sid, r.clock_state,
+                       (
+                         -- Zero while inside a recording, otherwise the distance
+                         -- to the closest edge of the closest one.
+                         SELECT min(greatest(
+                                  s.start_time - r.t,
+                                  r.t - coalesce(s.end_time, s.start_time),
+                                  0
+                                ))
+                         FROM sessions s
+                         LEFT JOIN uploads u ON u.phone_session_uuid = s.session_uuid
+                         WHERE coalesce(u.uploader_phone_id, 'unknown') = r.sid
+                       ) AS gap
+                FROM r
+            )
+            SELECT sid,
+                   sum(CASE WHEN clock_state = 'ok' AND gap IS NOT NULL
+                                 AND gap <= {PAIR_WINDOW_S} THEN 1 ELSE 0 END),
+                   sum(CASE WHEN clock_state = 'ok'
+                                 AND (gap IS NULL OR gap > {PAIR_WINDOW_S})
+                            THEN 1 ELSE 0 END),
+                   sum(CASE WHEN clock_state = 'never_read' THEN 1 ELSE 0 END),
+                   sum(CASE WHEN clock_state = 'invalid' THEN 1 ELSE 0 END),
+                   sum(CASE WHEN clock_state = 'suspect' THEN 1 ELSE 0 END),
+                   min(CASE WHEN clock_state = 'ok' AND gap > {PAIR_WINDOW_S}
+                            THEN gap END)
+            FROM g
             GROUP BY 1
             """,
-            # Placeholder order: the subject list appears in the WHERE before the
-            # timezone inside the EXISTS clause. Reversing these binds the
-            # timezone as a subject name and reports zero pairs -- which looks
-            # like "no calibration data yet" rather than like a bug.
-            [*cuff_params, tz],
+            # Placeholder order: the timezone appears inside the first CTE, ahead
+            # of the subject list in its WHERE. Reversing these binds the timezone
+            # as a subject name and reports zero pairs, which reads as "no
+            # calibration data yet" rather than as a bug.
+            [tz, *cuff_params],
         ).fetchall()
-        for sid, n in rows:
-            subject(sid).pairs = int(n)
+        for sid, paired, no_overlap, never_read, invalid, suspect, miss in rows:
+            sub = subject(sid)
+            sub.pairs = int(paired or 0)
+            sub.unpaired_no_overlap = int(no_overlap or 0)
+            sub.unpaired_clock_never_read = int(never_read or 0)
+            sub.unpaired_clock_invalid = int(invalid or 0)
+            sub.unpaired_clock_suspect = int(suspect or 0)
+            sub.nearest_miss_s = float(miss) if miss is not None else None
 
     sids = _allowed_session_ids(con, tables, subjects)
     sid_clause = "TRUE" if sids is None else (
@@ -329,6 +388,7 @@ def collect(
         quality = {"minutes": int(row[0] or 0), "good_minutes": int(row[1] or 0)}
 
     uploads: dict[str, int] = {}
+    pending: dict[str, Any] = {"count": 0, "oldest_age_s": None, "in_flight": 0}
     if "uploads" in tables:
         up_clause, up_params = _subject_clause(subjects, "uploader_phone_id")
         uploads = {
@@ -337,6 +397,32 @@ def collect(
                 f"SELECT status, count(*) FROM uploads WHERE {up_clause} GROUP BY 1",
                 up_params,
             ).fetchall()
+        }
+        row = con.execute(
+            f"""
+            SELECT count(*), min(opened_at)
+            FROM uploads
+            WHERE {up_clause} AND coalesce(status, '') <> 'complete'
+            """,
+            up_params,
+        ).fetchone()
+        n_pending = int(row[0] or 0)
+        oldest = float(row[1]) if row[1] is not None else None
+        in_flight = int(
+            con.execute(
+                f"""
+                SELECT count(*) FROM uploads
+                WHERE {up_clause} AND coalesce(status, '') <> 'complete'
+                  AND opened_at >= ?
+                """,
+                [*up_params, now - UPLOAD_IN_FLIGHT_S],
+            ).fetchone()[0]
+            or 0
+        )
+        pending = {
+            "count": n_pending,
+            "oldest_age_s": _age(oldest, now),
+            "in_flight": in_flight,
         }
 
     payload = {
@@ -359,6 +445,7 @@ def collect(
         "clock": clock,
         "quality": quality,
         "uploads": uploads,
+        "uploads_pending": pending,
         "recent_sessions": _recent_sessions(con, tables, subjects),
         "recent_cuff": _recent_cuff(con, tables, subjects),
         "markers": _markers(con, tables, sid_clause),
@@ -541,13 +628,7 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
         pairs = s.get("pairs", 0)
         if pairs == 0:
             out.append(
-                Warning_(
-                    "warn",
-                    sid,
-                    "No calibration pairs",
-                    "No cuff reading falls inside a recording, so nothing can be "
-                    "calibrated yet.",
-                )
+                Warning_("warn", sid, "No calibration pairs", _why_no_pairs(s))
             )
         elif pairs < PAIR_TARGET:
             out.append(
@@ -584,14 +665,29 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
             Warning_("warn", None, f"{clock['suspect']} cuff readings quarantined on the phone")
         )
 
-    incomplete = sum(n for st, n in payload.get("uploads", {}).items() if st != "complete")
-    if incomplete:
+    pending = payload.get("uploads_pending", {})
+    stalled = pending.get("count", 0) - pending.get("in_flight", 0)
+    if stalled > 0:
         out.append(
             Warning_(
                 "error",
                 None,
-                f"{incomplete} uploads never completed",
+                f"{stalled} uploads never completed",
                 "The bundle reached the server but was not converted.",
+            )
+        )
+    elif pending.get("in_flight"):
+        # Deliberately not an error: this is the normal state for the first
+        # minutes after a recording ends, and crying wolf here trains the reader
+        # to ignore the row that matters.
+        out.append(
+            Warning_(
+                "info",
+                None,
+                f"{pending['in_flight']} upload in progress"
+                if pending["in_flight"] == 1
+                else f"{pending['in_flight']} uploads in progress",
+                "Started recently and still transferring.",
             )
         )
 
@@ -611,6 +707,53 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rank = {"error": 0, "warn": 1, "info": 2}
     out.sort(key=lambda w: rank.get(w.level, 9))
     return [w.as_dict() for w in out]
+
+
+def _why_no_pairs(s: dict[str, Any]) -> str:
+    """Name the most likely cause of zero pairs for one subject.
+
+    Ordered by what has to be fixed first. A clock that was never read blocks
+    pairing regardless of timing, so it outranks a reading that merely fell
+    outside a recording.
+    """
+    u = s.get("unpaired", {})
+    if not s.get("cuff_readings"):
+        return "No cuff readings yet."
+    if not s.get("sessions"):
+        return "No recordings yet, so there is nothing for a reading to fall inside."
+    if u.get("clock_never_read"):
+        return (
+            f"{u['clock_never_read']} readings have no cuff clock offset. Run a cuff "
+            "sync so the offset is measured, otherwise nothing can be paired."
+        )
+    if u.get("clock_suspect") or u.get("clock_invalid"):
+        n = u.get("clock_suspect", 0) + u.get("clock_invalid", 0)
+        return (
+            f"{n} readings have an untrustworthy cuff clock, so their time cannot be "
+            "trusted against a recording."
+        )
+    miss = s.get("nearest_miss_s")
+    if miss is None:
+        return "No cuff reading falls inside a recording."
+    mins = miss / 60.0
+    # A near-exact whole number of hours is the signature of a clock or timezone
+    # fault rather than of mistimed measurements, and the two need opposite fixes.
+    off_hour = abs(miss - round(miss / 3600.0) * 3600.0)
+    if miss > 1800 and off_hour < 120 and miss >= 3540:
+        hours = round(miss / 3600.0)
+        return (
+            f"Closest reading misses a recording by almost exactly {hours} h. That "
+            "is a clock or timezone fault, not mistimed measurements."
+        )
+    if mins < 30:
+        return (
+            f"Closest reading misses a recording by {mins:.0f} min. Take the cuff "
+            "reading while the recording is running."
+        )
+    return (
+        f"Closest reading is {_days(miss) if miss >= 86400 else f'{mins / 60:.1f} h'} "
+        "from any recording."
+    )
 
 
 def _days(seconds: float) -> str:

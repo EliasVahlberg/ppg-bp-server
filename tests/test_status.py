@@ -104,13 +104,25 @@ def test_legacy_readings_without_provenance_are_informational_not_errors():
     assert not [x for x in w if x["level"] == "error"]
 
 
-def test_invalid_clock_and_incomplete_uploads_are_errors():
+def test_invalid_clock_and_stalled_uploads_are_errors():
     p = _payload()
     p["clock"]["not_valid"] = 3
     p["uploads"] = {"complete": 4, "staged": 1}
+    p["uploads_pending"] = {"count": 1, "in_flight": 0, "oldest_age_s": 7200.0}
     w = st.assess(p)
     assert _levels(w, "untrustworthy clock") == ["error"]
     assert _levels(w, "never completed") == ["error"]
+
+
+def test_an_upload_still_in_flight_is_not_an_error():
+    """The normal state for the first minutes after a recording ends. Reporting it
+    as an error mid-session trains the reader to ignore the row that matters."""
+    p = _payload()
+    p["uploads"] = {"complete": 4, "staged": 1}
+    p["uploads_pending"] = {"count": 1, "in_flight": 1, "oldest_age_s": 90.0}
+    w = st.assess(p)
+    assert _levels(w, "never completed") == []
+    assert _levels(w, "in progress") == ["info"]
 
 
 def test_poor_signal_quality_warns():
@@ -388,3 +400,91 @@ def test_asset_route_refuses_path_traversal(client):
     c, _, _ = client
     assert c.get("/app/../config.py").status_code in (404, 400)
     assert c.get("/app/%2e%2e/config.py").status_code in (404, 400)
+
+
+# ---------------------------------------------------------------------------
+# Why pairing failed
+# ---------------------------------------------------------------------------
+#
+# These matter during a session rather than afterwards: the reason has to be on
+# the page while the person and the equipment are still in the room, because that
+# is the only moment when the run can be repeated.
+
+
+def test_no_pairs_names_a_missing_cuff_clock_first():
+    """A clock that was never read blocks pairing regardless of timing, so it
+    outranks any complaint about when the reading was taken."""
+    msg = st._why_no_pairs(
+        {
+            "cuff_readings": 6,
+            "sessions": 2,
+            "unpaired": {"clock_never_read": 6, "no_overlap": 0},
+            "nearest_miss_s": 30.0,
+        }
+    )
+    assert "cuff sync" in msg and "6" in msg
+
+
+def test_no_pairs_distinguishes_a_clock_fault_from_mistimed_measurements():
+    """A near-exact whole number of hours is a timezone or clock fault. Mistimed
+    measurements miss by minutes. The two need opposite fixes, so the message must
+    not be the same."""
+    clock_fault = st._why_no_pairs(
+        {"cuff_readings": 6, "sessions": 2, "unpaired": {}, "nearest_miss_s": 7205.0}
+    )
+    assert "clock or timezone" in clock_fault and "2 h" in clock_fault
+
+    mistimed = st._why_no_pairs(
+        {"cuff_readings": 6, "sessions": 2, "unpaired": {}, "nearest_miss_s": 480.0}
+    )
+    assert "while the recording is running" in mistimed
+    assert "timezone" not in mistimed
+
+
+def test_no_pairs_reports_the_obvious_cases_plainly():
+    assert "No cuff readings" in st._why_no_pairs({"cuff_readings": 0, "sessions": 1})
+    assert "No recordings" in st._why_no_pairs({"cuff_readings": 4, "sessions": 0})
+
+
+def test_unpaired_readings_are_counted_by_reason(store):
+    """One row per reason, each counted exactly once, so the totals can be trusted
+    to add up to the readings that did not pair."""
+    con = duckdb.connect(str(store))
+    begin, end = NOW - 3600, NOW - 3000
+    _insert_recording(con, sid=1, uuid="u1", start=begin, end=end, uploader="p1")
+    tz = st.local_timezone(con)
+
+    def wall(epoch):
+        return con.execute(
+            "SELECT strftime(timezone(?, to_timestamp(?)), '%Y-%m-%dT%H:%M:%S')", [tz, epoch]
+        ).fetchone()[0]
+
+    # inside the recording with a good clock: pairs
+    _insert_cuff(con, reading_id="a", taken_at=wall(begin + 60), uploader="p1")
+    # three hours away with a good clock: no overlap
+    _insert_cuff(con, reading_id="b", taken_at=wall(begin + 10800), uploader="p1")
+    # inside, but no offset was ever measured
+    _insert_cuff(con, reading_id="c", taken_at=wall(begin + 120), uploader="p1",
+                 offset=None, valid=None)
+    # inside, but the phone rejected the clock
+    _insert_cuff(con, reading_id="d", taken_at=wall(begin + 180), uploader="p1", valid=False)
+    # inside, but flagged as a suspect jump
+    _insert_cuff(con, reading_id="e", taken_at=wall(begin + 240), uploader="p1", suspect=True)
+    con.close()
+
+    con = duckdb.connect(str(store), read_only=True)
+    try:
+        out = st.collect(con, now=NOW)
+    finally:
+        con.close()
+    s = out["subjects"][0]
+    assert s["pairs"] == 1
+    assert s["unpaired"] == {
+        "no_overlap": 1,
+        "clock_never_read": 1,
+        "clock_invalid": 1,
+        "clock_suspect": 1,
+    }
+    # The nearest miss describes the usable-clock reading that fell outside, and
+    # its size is what separates a clock fault from a mistimed measurement.
+    assert 10000 < s["nearest_miss_s"] < 11000

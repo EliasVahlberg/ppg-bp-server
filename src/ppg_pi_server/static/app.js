@@ -39,6 +39,26 @@ function tile(key, value, sub, state) {
 
 const DAY = 86400;
 
+/* Which readings did not pair, and how far off the closest one was. The size of
+   that gap is the diagnosis: minutes means a mistimed measurement, a whole number
+   of hours means a clock or timezone fault, and the two need opposite fixes. */
+function unpairedLine(s) {
+  const u = s.unpaired || {};
+  const bits = [];
+  if (u.no_overlap) bits.push(u.no_overlap + " outside a recording");
+  if (u.clock_never_read) bits.push(u.clock_never_read + " with no cuff clock");
+  if (u.clock_invalid) bits.push(u.clock_invalid + " clock rejected");
+  if (u.clock_suspect) bits.push(u.clock_suspect + " clock suspect");
+  if (!bits.length) return "";
+  let line = "Unpaired: " + bits.join(", ") + ".";
+  const miss = s.nearest_miss_s;
+  if (miss !== null && miss !== undefined) {
+    line += " Closest miss " + (miss < 5400 ? Math.round(miss / 60) + " min" :
+      (miss / 3600).toFixed(1) + " h") + ".";
+  }
+  return line;
+}
+
 function renderSubject(s) {
   /* Four tiles, not six. Each one is something that can prompt an action:
      is data still arriving, is the cuff about to overwrite, is there enough
@@ -62,7 +82,8 @@ function renderSubject(s) {
     "</div>" +
     '<p class="sub-detail">' + fmtInt(s.sessions) + " recordings, " + s.recorded_hours +
     " h. " + fmtInt(s.cuff_readings) + " cuff readings" +
-    (s.cuff_per_day ? " at " + s.cuff_per_day + "/day" : "") + ".</p>" +
+    (s.cuff_per_day ? " at " + s.cuff_per_day + "/day" : "") + ". " +
+    unpairedLine(s) + "</p>" +
     "</div>"
   );
 }
