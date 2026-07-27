@@ -44,3 +44,7 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Vendored upstream code is excluded: keeping it byte-identical to its source is
+# worth more than lint cleanliness, since any local edit must be re-applied on
+# every re-vendor.
+extend-exclude = ["src/ppg_pi_server/_vendor"]
