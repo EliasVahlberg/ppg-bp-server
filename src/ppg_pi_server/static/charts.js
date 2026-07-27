@@ -229,10 +229,13 @@ function coverage(rows, days, h) {
     const x = PAD.l + i * bw;
     const e = byDay[d];
     const mins = e ? e.minutes : 0;
-    const y = ys(mins);
+    /* A day with no recording gets a visible stub rather than a zero-height bar.
+       The legend promises a "no data" mark, and an invisible one would make an
+       empty day indistinguishable from a day that is off the chart entirely. */
+    const y = mins > 0 ? ys(mins) : h - PAD.b - 2;
     s += '<rect x="' + (x + 1).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' +
-         Math.max(1, bw - 2).toFixed(1) + '" height="' + (h - PAD.b - y).toFixed(1) +
-         '" fill="' + (mins > 0 ? C.green : C.outline) + '" opacity="' + (mins > 0 ? 0.85 : 0.5) +
+         Math.max(1, bw - 2).toFixed(1) + '" height="' + Math.max(2, h - PAD.b - y).toFixed(1) +
+         '" fill="' + (mins > 0 ? C.green : C.outline) + '" opacity="' + (mins > 0 ? 0.85 : 0.7) +
          '"><title>' + esc(d + ": " + mins.toFixed(0) + " min recorded, " +
          (e ? e.cuff : 0) + " cuff readings") + "</title></rect>";
     if (e && e.cuff > 0) {
