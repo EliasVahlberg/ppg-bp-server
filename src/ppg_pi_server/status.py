@@ -229,10 +229,18 @@ def collect(
 
     clock: dict[str, Any] = {"cuff_total": count("cuff_readings")}
     if "cuff_readings" in tables:
+        # Two different things must not be conflated. A reading measured and found
+        # untrustworthy is actionable: the cuff clock needs setting. A reading that
+        # predates clock provenance entirely was already overwritten in the cuff's
+        # ring and can never be re-uploaded, so nothing can ever be done about it.
+        # Reporting the second as an error produces a warning that can never be
+        # cleared, which teaches the reader to ignore warnings.
         row = con.execute(
             """
             SELECT sum(CASE WHEN clock_offset_s IS NOT NULL THEN 1 ELSE 0 END),
-                   sum(CASE WHEN coalesce(clock_valid, FALSE) THEN 0 ELSE 1 END),
+                   sum(CASE WHEN clock_offset_s IS NOT NULL
+                             AND NOT coalesce(clock_valid, FALSE) THEN 1 ELSE 0 END),
+                   sum(CASE WHEN clock_offset_s IS NULL THEN 1 ELSE 0 END),
                    sum(CASE WHEN coalesce(clock_suspect, FALSE) THEN 1 ELSE 0 END),
                    max(abs(clock_offset_s))
             FROM cuff_readings
@@ -241,8 +249,9 @@ def collect(
         clock.update(
             with_provenance=int(row[0] or 0),
             not_valid=int(row[1] or 0),
-            suspect=int(row[2] or 0),
-            max_abs_offset_s=float(row[3]) if row[3] is not None else None,
+            no_provenance=int(row[2] or 0),
+            suspect=int(row[3] or 0),
+            max_abs_offset_s=float(row[4]) if row[4] is not None else None,
         )
 
     quality: dict[str, Any] = {"minutes": 0, "good_minutes": 0}
@@ -469,6 +478,16 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 None,
                 f"{clock['not_valid']} cuff readings have an untrustworthy clock",
                 "These cannot be paired with PPG.",
+            )
+        )
+    if clock.get("no_provenance"):
+        out.append(
+            Warning_(
+                "info",
+                None,
+                f"{clock['no_provenance']} cuff readings predate clock provenance",
+                "Recorded before the phone measured the cuff's clock, and already "
+                "overwritten in the cuff, so they cannot be repaired. Not pairable.",
             )
         )
     if clock.get("suspect"):

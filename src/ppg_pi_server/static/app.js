@@ -133,10 +133,14 @@ function render(d, stale) {
     ? d.subjects.map(renderSubject).join("")
     : "<p>No data uploaded yet.</p>";
   el("tables").innerHTML = renderTables(d);
+  const c = d.clock || {};
+  const legacy = c.no_provenance
+    ? " " + c.no_provenance + " cuff readings predate clock provenance."
+    : "";
   const t = d.totals;
   el("totals").innerHTML =
     "Store: " + fmtInt(t.sessions) + " recordings, " + fmtInt(t.ppg_samples) + " PPG samples, " +
-    fmtInt(t.cuff_readings) + " cuff readings, " + fmtInt(t.notes) + " notes." +
+    fmtInt(t.cuff_readings) + " cuff readings, " + fmtInt(t.notes) + " notes." + legacy +
     (d.viewer ? " Signed in as " + d.viewer + "." : "");
   el("updated").innerHTML = stale
     ? '<span class="stale">Stale — last update ' + fmtClock(lastAt / 1000) + "</span>"

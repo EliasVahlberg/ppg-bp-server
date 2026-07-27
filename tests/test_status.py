@@ -93,6 +93,17 @@ def test_zero_pairs_warns_and_partial_pairs_informs():
     assert _levels(st.assess(_payload(pairs=6)), "6 of 20 calibration pairs") == ["info"]
 
 
+def test_legacy_readings_without_provenance_are_informational_not_errors():
+    """They cannot be repaired -- the cuff overwrote them -- so an error every day
+    forever would only teach the reader to ignore errors."""
+    p = _payload()
+    p["clock"]["no_provenance"] = 4
+    w = st.assess(p)
+    hit = [x for x in w if "predate clock provenance" in x["message"]]
+    assert hit and hit[0]["level"] == "info"
+    assert not [x for x in w if x["level"] == "error"]
+
+
 def test_invalid_clock_and_incomplete_uploads_are_errors():
     p = _payload()
     p["clock"]["not_valid"] = 3
