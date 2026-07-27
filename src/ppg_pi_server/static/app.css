@@ -1,0 +1,111 @@
+/* Deliberately plain: no framework, no build step, no CDN.
+   Colours meet WCAG AA contrast on white, and every status is carried by text
+   as well as colour so it survives colour-blindness and greyscale printing. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1b1b1b;
+  --muted: #5c5c5c;
+  --line: #d6d6d6;
+  --error: #a3111f;
+  --error-bg: #fdecee;
+  --warn: #8a5300;
+  --warn-bg: #fdf4e3;
+  --ok: #1d6b3f;
+  --ok-bg: #eaf6ee;
+  --accent: #0b3d63;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 1rem 3rem;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  max-width: 60rem;
+  margin-inline: auto;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 1rem 0 0.5rem;
+  border-bottom: 2px solid var(--accent);
+}
+
+h1 { font-size: 1.4rem; margin: 0; color: var(--accent); }
+h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+
+.meta { margin-left: auto; display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.9rem; }
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--accent);
+  background: #fff;
+  color: var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+  /* 44px minimum touch target: this gets used one-handed on a phone. */
+  min-height: 2.75rem;
+}
+button:hover { background: #f0f5f9; }
+button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+input {
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  width: 100%;
+  min-height: 2.75rem;
+}
+label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+#login-form { display: grid; gap: 0.5rem; max-width: 28rem; }
+
+.error { color: var(--error); font-weight: 600; }
+
+/* --- warnings --- */
+.w { padding: 0.6rem 0.8rem; border-left: 4px solid; border-radius: 3px; margin-bottom: 0.5rem; }
+.w-error { border-color: var(--error); background: var(--error-bg); }
+.w-warn  { border-color: var(--warn);  background: var(--warn-bg); }
+.w-info  { border-color: var(--accent); background: #eef4f9; }
+.w .lvl { font-weight: 700; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.04em; }
+.w .msg { font-weight: 600; }
+.w .det { color: var(--muted); font-size: 0.9rem; }
+.all-clear { padding: 0.6rem 0.8rem; border-left: 4px solid var(--ok); background: var(--ok-bg); }
+
+/* --- subject cards --- */
+.subject { border: 1px solid var(--line); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+.subject h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+.subject .who { font-family: ui-monospace, monospace; background: #f2f2f2; padding: 0.1rem 0.35rem; border-radius: 3px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.5rem; }
+.tile { border: 1px solid var(--line); border-radius: 5px; padding: 0.5rem 0.6rem; }
+.tile .k { display: block; font-size: 0.8rem; color: var(--muted); }
+.tile .v { font-size: 1.3rem; font-weight: 700; }
+.tile .v small { font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+.tile.is-error { background: var(--error-bg); border-color: var(--error); }
+.tile.is-error .v { color: var(--error); }
+.tile.is-warn { background: var(--warn-bg); border-color: var(--warn); }
+.tile.is-ok .v { color: var(--ok); }
+
+/* --- tables --- */
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; margin-bottom: 1.25rem; }
+caption { text-align: left; font-weight: 700; padding: 0.5rem 0 0.25rem; }
+th, td { border: 1px solid var(--line); padding: 0.3rem 0.5rem; text-align: left; }
+th { background: #f4f4f4; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.flag { color: var(--error); font-weight: 700; }
+
+#totals { color: var(--muted); font-size: 0.9rem; }
+footer { margin-top: 2rem; padding-top: 0.75rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.85rem; }
+.stale { color: var(--error); font-weight: 700; }
+
+@media (max-width: 30rem) {
+  .tile .v { font-size: 1.15rem; }
+  header { padding-top: 0.5rem; }
+}

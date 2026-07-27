@@ -17,11 +17,28 @@ import secrets
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from .config import Settings, get_settings
 
 logger = logging.getLogger("ppg_pi_server.auth")
+
+
+#: Full access: may upload data. The phones hold these.
+SCOPE_WRITE = "write"
+
+#: Read-only: may view the web UI and status API, may not ingest.
+#:
+#: The web UI keeps its token in a browser cookie, which is a weaker place to
+#: hold a secret than app-private storage. Separating the scope means a stolen
+#: cookie can read data but cannot inject fabricated readings into a clinical
+#: dataset, which would be both harder to detect and harder to undo.
+SCOPE_READ = "read"
+
+#: Cookie holding the viewer token. HttpOnly, SameSite=Strict, and Secure only
+#: when the request arrived over HTTPS (plain HTTP over Tailscale is the current
+#: transport, and a Secure cookie would simply never be sent back).
+SESSION_COOKIE = "ppgbp_session"
 
 
 def generate_token() -> str:
@@ -29,8 +46,21 @@ def generate_token() -> str:
     return secrets.token_hex(32)
 
 
-def add_token(settings: Settings, phone_id: str, *, token: str | None = None) -> str:
+def token_scope(meta: dict) -> str:
+    """Scope of a token. Tokens predating scopes are write, as they were."""
+    return str(meta.get("scope") or SCOPE_WRITE)
+
+
+def add_token(
+    settings: Settings,
+    phone_id: str,
+    *,
+    token: str | None = None,
+    scope: str = SCOPE_WRITE,
+) -> str:
     """Add a token to the allowlist. Returns the (existing or new) token."""
+    if scope not in (SCOPE_WRITE, SCOPE_READ):
+        raise ValueError(f"unknown scope: {scope}")
     tokens = settings.load_tokens()
     # If the phone already has a token, return it (idempotent).
     for existing_token, meta in tokens.items():
@@ -41,6 +71,7 @@ def add_token(settings: Settings, phone_id: str, *, token: str | None = None) ->
     tokens[new_token] = {
         "phone_id": phone_id,
         "created_at": datetime.now(UTC).isoformat(),
+        "scope": scope,
     }
     settings.save_tokens(tokens)
     return new_token
@@ -80,4 +111,46 @@ async def require_bearer(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid bearer token",
         )
+    if token_scope(meta) != SCOPE_WRITE:
+        logger.warning(
+            "auth failed: read-only token used on a write route (phone_id=%s)",
+            meta.get("phone_id"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token is read-only",
+        )
     return {"token": token, **meta}
+
+
+def resolve_token(settings: Settings, token: str | None) -> dict | None:
+    """Look a token up in the allowlist, returning metadata or None."""
+    if not token:
+        return None
+    meta = settings.load_tokens().get(token)
+    return None if meta is None else {"token": token, **meta}
+
+
+async def require_viewer(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+    settings: Annotated[Settings, Depends(get_settings)] = ...,
+) -> dict:
+    """Read access, from either a bearer header or the session cookie.
+
+    Any valid token may read. The cookie exists because a browser cannot send a
+    bearer header on a plain navigation, and asking a patient to paste a token on
+    every visit would guarantee the page never gets used.
+    """
+    token: str | None = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    if token is None:
+        token = request.cookies.get(SESSION_COOKIE)
+    meta = resolve_token(settings, token)
+    if meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sign in required",
+        )
+    return meta

@@ -17,15 +17,16 @@ import sys
 import duckdb
 
 from ._corelib import converter
-from .auth import add_token, generate_token, revoke_token
+from .auth import add_token, revoke_token
 from .config import get_settings
 from .schema import init_audit_schema
 
 
 def _cmd_token_add(args) -> int:
     settings = get_settings()
-    token = add_token(settings, args.phone_id, token=args.token)
+    token = add_token(settings, args.phone_id, token=args.token, scope=args.scope)
     print(f"Phone:  {args.phone_id}")
+    print(f"Scope:  {args.scope}")
     print(f"Token:  {token}")
     print()
     print(f"Stored in {settings.tokens_file}.")
@@ -95,6 +96,15 @@ def main(argv: list[str] | None = None) -> int:
     add = token_sub.add_parser("add", help="Add a bearer token for a phone")
     add.add_argument("phone_id", help="Identifier for the phone (e.g. phone-01)")
     add.add_argument("--token", help="Use a specific token (default: random)")
+    add.add_argument(
+        "--scope",
+        choices=["write", "read"],
+        default="write",
+        help=(
+            "write: may upload (phones). read: may view the web UI and status "
+            "API only (browsers). Default write."
+        ),
+    )
     add.set_defaults(func=_cmd_token_add)
 
     lst = token_sub.add_parser("list", help="List tokens")

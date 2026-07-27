@@ -11,6 +11,8 @@ Routes:
 - ``PUT  /api/v1/upload/{uuid}/{filename}``     — stage one bundle file
 - ``POST /api/v1/sessions/{uuid}/complete``     — convert the staged bundle
 - ``GET  /api/v1/sessions``                     — list sessions (debug)
+- ``GET  /api/v1/status``                       — collection status (read scope)
+- ``GET  /app``                                 — status web UI (see web.py)
 
 The phone uploads the bundle files (``manifest.json``, ``segments.jsonl``,
 ``notes.*``, ``*.rop``), optionally gzip-encoded, then calls ``complete``.
@@ -46,6 +48,7 @@ from pydantic import BaseModel
 from .auth import require_bearer
 from .config import Settings, get_settings
 from .ingest import IngestError, Ingestor, valid_filename
+from .web import router as web_router
 
 logger = logging.getLogger("ppg_pi_server")
 
@@ -89,6 +92,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="PPG-BP Pi backend", version="0.2.0", lifespan=lifespan)
+
+# Web UI: status page and its JSON API. Same process as ingest, so there is one
+# token allowlist and one service to keep running. See web.py.
+app.include_router(web_router)
 
 
 @app.middleware("http")

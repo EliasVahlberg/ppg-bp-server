@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PPG-BP status</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0b3d63">
+<link rel="stylesheet" href="/app/app.css">
+</head>
+<body>
+<header>
+  <h1>Collection status</h1>
+  <div class="meta">
+    <span id="updated" aria-live="polite"></span>
+    <button id="refresh" type="button">Refresh</button>
+    <button id="signout" type="button" hidden>Sign out</button>
+  </div>
+</header>
+
+<!-- Sign-in is a panel rather than a separate page so a expired cookie does not
+     lose the user's place, and so the offline shell has nothing to route. -->
+<section id="login" hidden>
+  <h2>Sign in</h2>
+  <p>Paste an access token. Ask for a read-only token if this is a viewing device.</p>
+  <form id="login-form">
+    <label for="token">Access token</label>
+    <input id="token" name="token" type="password" autocomplete="current-password"
+           spellcheck="false" required>
+    <button type="submit">Sign in</button>
+  </form>
+  <p id="login-error" class="error" role="alert"></p>
+</section>
+
+<main id="main" hidden>
+  <section id="warnings" aria-label="Warnings"></section>
+  <section id="subjects" aria-label="Subjects"></section>
+
+  <details id="details">
+    <summary>Recent recordings, cuff readings and calibration markers</summary>
+    <div id="tables"></div>
+  </details>
+
+  <section id="totals" aria-label="Store totals"></section>
+</main>
+
+<footer>
+  <p>
+    Operational status only. Not medical advice, and no blood pressure value here
+    comes from PPG: the cuff is the only reference.
+  </p>
+</footer>
+
+<script src="/app/app.js"></script>
+</body>
+</html>

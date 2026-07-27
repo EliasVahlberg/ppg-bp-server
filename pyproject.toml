@@ -34,6 +34,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ppg_pi_server"]
+# The status UI ships as package data, not as a separate deployment step.
+artifacts = ["src/ppg_pi_server/static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

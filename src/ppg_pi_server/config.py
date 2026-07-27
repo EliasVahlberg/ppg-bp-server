@@ -81,6 +81,16 @@ class Settings(BaseSettings):
         description="Maximum upload size per request. ~200MB == 1h of calibration profile compressed.",
     )
 
+    local_timezone: str | None = Field(
+        default=None,
+        description=(
+            "IANA zone used to interpret the cuff's local wall-clock timestamps "
+            "when pairing them with recordings (e.g. Europe/Stockholm). Defaults "
+            "to the server's own zone, which is correct when the phone and server "
+            "share it."
+        ),
+    )
+
     # Analysis hook
     analysis_refresh_url: str | None = Field(
         default=None,
