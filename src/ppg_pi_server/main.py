@@ -6,6 +6,9 @@ converts them into the canonical DuckDB store via the shared converter.
 Routes:
 
 - ``GET  /health``                              — liveness
+- ``GET  /healthz``                              — liveness + DB reachability
+  (fast, no-retry; distinguishes a locked/leaked DuckDB store from a down
+  process -- see docstring on the route)
 - ``GET  /``                                    — landing page
 - ``POST /api/v1/sessions``                     — open a session (audit row)
 - ``PUT  /api/v1/upload/{uuid}/{filename}``     — stage one bundle file
@@ -29,9 +32,12 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import time
 import urllib.request
 from contextlib import asynccontextmanager
 from typing import Annotated, AsyncIterator
+
+import duckdb
 
 from fastapi import (
     BackgroundTasks,
@@ -105,8 +111,12 @@ async def log_requests(request: Request, call_next):
     t0 = _time.perf_counter()
     response = await call_next(request)
     elapsed_ms = (_time.perf_counter() - t0) * 1000
-    # Skip noisy health checks at DEBUG, log everything else at INFO
-    lvl = logging.DEBUG if request.url.path == "/health" else logging.INFO
+    # Skip noisy health checks at DEBUG when they succeed, so a periodic
+    # monitor polling /healthz doesn't flood the log -- but any non-200 from
+    # a health route (e.g. /healthz reporting the DB is locked) is exactly
+    # the kind of thing worth seeing at INFO, not buried at DEBUG.
+    is_health_route = request.url.path in ("/health", "/healthz")
+    lvl = logging.DEBUG if is_health_route and response.status_code == 200 else logging.INFO
     logger.log(lvl, "%s %s → %d (%.0fms)",
                request.method, request.url.path, response.status_code, elapsed_ms)
     return response
@@ -187,6 +197,71 @@ class CuffUploadResponse(BaseModel):
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "version": "0.2.0"}
+
+
+@app.get("/healthz")
+async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONResponse:
+    """Deeper liveness probe: actually touch the DuckDB store.
+
+    ``/health`` only proves the process is alive -- it was still returning 200
+    throughout the 2026-07-27 outage, because the process was fine; the store's
+    write lock was leaked by a *different* process (the analysis dashboard).
+    This endpoint exists to catch exactly that class of problem from outside,
+    without needing adb/SSH access: a single-attempt, no-retry read-only open.
+
+    Deliberately does not use the ``/api/v1/status`` retry-with-backoff logic
+    (``_read_only_connection`` in ``web.py``) -- that logic exists to *tolerate*
+    a normal ~28s refresh lock, which is the right behavior for a real viewer
+    request. A monitoring probe wants the opposite: fail fast and say "locked"
+    within a second, not silently wait up to ~28s before reporting anything.
+
+    No auth: same reasoning as ``GET /`` above -- low-sensitivity (booleans and
+    a millisecond count, no patient data), and this server already relies on
+    network-layer isolation (Tailscale/LAN bind) rather than per-route auth for
+    that class of endpoint.
+    """
+    db_path_exists = settings.db_path.exists()
+    if not db_path_exists:
+        return JSONResponse(
+            status_code=503,
+            content={"server": "ok", "db": "missing", "detail": str(settings.db_path)},
+        )
+
+    t0 = time.perf_counter()
+    try:
+        con = duckdb.connect(str(settings.db_path), read_only=True)
+        try:
+            con.execute("SELECT 1").fetchone()
+        finally:
+            con.close()
+    except (duckdb.IOException, duckdb.ConnectionException) as exc:
+        # IOException is the exact failure mode from 2026-07-27: a *separate
+        # process* (typically ppg-dashboard.service) holds the write lock.
+        # ConnectionException covers the same-process variant (DuckDB refuses
+        # a second connection with different config in one interpreter) --
+        # different code path, same practical meaning for a monitor: the
+        # store cannot be read right now.
+        return JSONResponse(
+            status_code=503,
+            content={
+                "server": "ok",
+                "db": "locked",
+                "detail": str(exc).splitlines()[0],
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - report, don't crash the probe itself
+        return JSONResponse(
+            status_code=503,
+            content={"server": "ok", "db": "error", "detail": str(exc)},
+        )
+    return JSONResponse(
+        content={
+            "server": "ok",
+            "db": "ok",
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+        }
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
