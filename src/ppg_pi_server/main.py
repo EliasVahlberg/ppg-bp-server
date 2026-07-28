@@ -7,8 +7,10 @@ Routes:
 
 - ``GET  /health``                              — liveness
 - ``GET  /healthz``                              — liveness + DB reachability
-  (fast, no-retry; distinguishes a locked/leaked DuckDB store from a down
-  process -- see docstring on the route)
+  + last-ingest timestamps + recent warnings (fast, no-retry; distinguishes a
+  locked/leaked DuckDB store from a down process, and a quiet-but-fine store
+  from one that has actually stopped receiving data -- see docstring on the
+  route)
 - ``GET  /``                                    — landing page
 - ``POST /api/v1/sessions``                     — open a session (audit row)
 - ``PUT  /api/v1/upload/{uuid}/{filename}``     — stage one bundle file
@@ -29,12 +31,14 @@ for that one route. See ``config.Settings.bind_host``.
 
 from __future__ import annotations
 
+import collections
 import gzip
 import json
 import logging
 import time
 import urllib.request
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Annotated, AsyncIterator
 
 import duckdb
@@ -69,6 +73,46 @@ def _configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s [%(funcName)s]: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    logging.getLogger().addHandler(recent_errors)
+
+
+class _RecentErrorsHandler(logging.Handler):
+    """Bounded in-memory ring buffer of WARNING+ log records.
+
+    Exists for ``/healthz``: a monitor asking "is anything wrong" from outside
+    the box has no access to ``journalctl`` (that's the whole point -- the
+    2026-07-27 outage needed exactly that access, over SSH, to diagnose).
+    Reading a log *file* from inside a request handler was considered and
+    rejected -- this app has no configured log file, logging goes to
+    stdout/journald, and coupling ``/healthz`` to "shell out to journalctl"
+    would need extra permissions and tie the endpoint to systemd specifically.
+    A ring buffer already living in the same process needs neither.
+
+    Deliberately WARNING+ only, not INFO: this exists to answer "is there a
+    problem", not to be a general log viewer. Deliberately capped at a small
+    fixed size: this is diagnostic context for a monitor, not persistent
+    storage -- history that matters belongs in the DB (uploads/cuff_readings
+    timestamps) or the journal, not here.
+    """
+
+    def __init__(self, maxlen: int = 20) -> None:
+        super().__init__(level=logging.WARNING)
+        self._buf: collections.deque[str] = collections.deque(maxlen=maxlen)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._buf.append(self.format(record))
+        except Exception:  # noqa: BLE001 - a logging handler must never raise
+            pass
+
+    def recent(self) -> list[str]:
+        return list(self._buf)
+
+
+recent_errors = _RecentErrorsHandler()
+recent_errors.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
+)
 
 
 _configure_logging()
@@ -201,7 +245,8 @@ async def health() -> dict:
 
 @app.get("/healthz")
 async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONResponse:
-    """Deeper liveness probe: actually touch the DuckDB store.
+    """Deeper liveness probe: touch the DuckDB store and report what's actually
+    been happening, not just whether a trivial query succeeds.
 
     ``/health`` only proves the process is alive -- it was still returning 200
     throughout the 2026-07-27 outage, because the process was fine; the store's
@@ -215,16 +260,35 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
     request. A monitoring probe wants the opposite: fail fast and say "locked"
     within a second, not silently wait up to ~28s before reporting anything.
 
-    No auth: same reasoning as ``GET /`` above -- low-sensitivity (booleans and
-    a millisecond count, no patient data), and this server already relies on
-    network-layer isolation (Tailscale/LAN bind) rather than per-route auth for
-    that class of endpoint.
+    A bare "can I open the store" check is a shallow signal on its own -- it
+    says the DB *can* be reached, not that anything real is happening through
+    it. Two things are added to make a misdiagnosis less likely:
+
+    - ``recent_warnings``: the last few WARNING+ log lines from this process
+      (see ``_RecentErrorsHandler`` above), always included regardless of the
+      DB check's outcome. A locked DB and the log line explaining *why* it got
+      locked are more useful together than either alone.
+    - ``last_ingest_at`` / ``last_cuff_sync_at``: the most recent timestamps
+      actually written by real uploads (``uploads.completed_at`` and
+      ``cuff_readings.uploaded_at``). This is the "is it actually being
+      reached and used" signal -- a store that opens fine but hasn't received
+      anything in days is a different problem than a locked store, and this
+      endpoint could not previously tell the two apart.
+
+    No auth: same reasoning as ``GET /`` above -- low-sensitivity (booleans, a
+    millisecond count, timestamps, and log lines that are operational, not
+    patient data), and this server already relies on network-layer isolation
+    (Tailscale/LAN bind) rather than per-route auth for that class of endpoint.
     """
-    db_path_exists = settings.db_path.exists()
-    if not db_path_exists:
+    warnings = recent_errors.recent()
+
+    if not settings.db_path.exists():
         return JSONResponse(
             status_code=503,
-            content={"server": "ok", "db": "missing", "detail": str(settings.db_path)},
+            content={
+                "server": "ok", "db": "missing", "detail": str(settings.db_path),
+                "recent_warnings": warnings,
+            },
         )
 
     t0 = time.perf_counter()
@@ -232,6 +296,7 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
         con = duckdb.connect(str(settings.db_path), read_only=True)
         try:
             con.execute("SELECT 1").fetchone()
+            last_ingest_at, last_cuff_sync_at = _last_activity(con)
         finally:
             con.close()
     except (duckdb.IOException, duckdb.ConnectionException) as exc:
@@ -248,20 +313,44 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
                 "db": "locked",
                 "detail": str(exc).splitlines()[0],
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+                "recent_warnings": warnings,
             },
         )
     except Exception as exc:  # noqa: BLE001 - report, don't crash the probe itself
         return JSONResponse(
             status_code=503,
-            content={"server": "ok", "db": "error", "detail": str(exc)},
+            content={"server": "ok", "db": "error", "detail": str(exc), "recent_warnings": warnings},
         )
     return JSONResponse(
         content={
             "server": "ok",
             "db": "ok",
             "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+            "last_ingest_at": last_ingest_at,
+            "last_cuff_sync_at": last_cuff_sync_at,
+            "recent_warnings": warnings,
         }
     )
+
+
+def _last_activity(con: duckdb.DuckDBPyConnection) -> tuple[str | None, str | None]:
+    """Most recent real-upload timestamps, as ISO-8601 UTC strings (or None).
+
+    Both tables are server-owned (schema.py) and exist on any store this
+    server has ever run against -- but a fresh/empty store legitimately has
+    zero rows in either, hence the None handling rather than assuming a row
+    exists.
+    """
+    def _max_epoch(table: str, column: str) -> str | None:
+        try:
+            row = con.execute(f"SELECT MAX({column}) FROM {table}").fetchone()
+        except duckdb.Error:
+            return None
+        if row is None or row[0] is None:
+            return None
+        return datetime.fromtimestamp(row[0], tz=timezone.utc).isoformat()
+
+    return _max_epoch("uploads", "completed_at"), _max_epoch("cuff_readings", "uploaded_at")
 
 
 @app.get("/", response_class=HTMLResponse)

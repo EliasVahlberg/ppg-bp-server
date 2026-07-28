@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -75,6 +76,70 @@ def test_healthz_reports_missing_db(client: TestClient, monkeypatch) -> None:
         app.dependency_overrides.pop(main_mod.get_settings, None)
     assert resp.status_code == 503
     assert resp.json()["db"] == "missing"
+    assert "recent_warnings" in resp.json()
+
+
+def test_healthz_reports_no_ingest_yet_on_a_fresh_store(client: TestClient) -> None:
+    """A brand-new store has zero rows in uploads/cuff_readings -- both
+    last-activity fields must be None, not a crash or a fabricated value."""
+    resp = client.get("/healthz")
+    body = resp.json()
+    assert body["db"] == "ok"
+    assert body["last_ingest_at"] is None
+    assert body["last_cuff_sync_at"] is None
+
+
+def test_healthz_reports_last_ingest_time_from_the_uploads_table(client: TestClient) -> None:
+    """The actual 'is it being reached and used' signal: a completed upload's
+    timestamp must surface here, distinct from the DB merely being openable."""
+    db_path = Path(os.environ["PPG_PI_SERVER_DB_PATH"])
+    con = duckdb.connect(str(db_path))
+    try:
+        ts = 1_785_300_000.0  # arbitrary epoch seconds
+        con.execute(
+            "INSERT INTO uploads (phone_session_uuid, uploader_phone_id, opened_at, "
+            "completed_at, status) VALUES ('test-uuid', 'phone-01', ?, ?, 'complete')",
+            [ts - 5, ts],
+        )
+    finally:
+        con.close()
+
+    body = client.get("/healthz").json()
+    assert body["last_ingest_at"] is not None
+    parsed = datetime.fromisoformat(body["last_ingest_at"])
+    assert abs(parsed.timestamp() - ts) < 1.0
+
+
+def test_healthz_reports_last_cuff_sync_time(client: TestClient) -> None:
+    db_path = Path(os.environ["PPG_PI_SERVER_DB_PATH"])
+    con = duckdb.connect(str(db_path))
+    try:
+        ts = 1_785_301_000.0
+        con.execute(
+            "INSERT INTO cuff_readings (reading_id, taken_at, sys, dia, pulse, "
+            "ihb, mov, device, uploader_phone_id, uploaded_at) VALUES "
+            "('r1', '2026-07-27T20:00:00', 120, 80, 65, false, false, 'omron', "
+            "'phone-01', ?)",
+            [ts],
+        )
+    finally:
+        con.close()
+
+    body = client.get("/healthz").json()
+    assert body["last_cuff_sync_at"] is not None
+    parsed = datetime.fromisoformat(body["last_cuff_sync_at"])
+    assert abs(parsed.timestamp() - ts) < 1.0
+
+
+def test_healthz_includes_recent_warnings(client: TestClient) -> None:
+    import logging
+
+    logger = logging.getLogger("ppg_pi_server.test_probe")
+    marker = "TEST-MARKER: simulated analysis refresh failure"
+    logger.warning(marker)
+
+    body = client.get("/healthz").json()
+    assert any(marker in line for line in body["recent_warnings"])
 
 
 def test_healthz_reports_locked_fast_not_after_a_long_wait(client: TestClient) -> None:
