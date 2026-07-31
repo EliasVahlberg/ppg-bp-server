@@ -125,6 +125,46 @@ def test_an_upload_still_in_flight_is_not_an_error():
     assert _levels(w, "in progress") == ["info"]
 
 
+def test_an_upload_abandoned_long_ago_warns_but_is_not_an_error():
+    """It must still be reported -- excluding it from `count` must not make it
+    vanish -- but not as an error: the recording is not lost (the phone keeps
+    local bundles) and no server-side action can clear it, so an error would be
+    a permanent red mark nobody can act on from here."""
+    p = _payload()
+    p["uploads"] = {"complete": 4, "staged": 1}
+    p["uploads_pending"] = {
+        "count": 0, "in_flight": 0, "oldest_age_s": None,
+        "abandoned": 3, "total_incomplete": 3,
+    }
+    w = st.assess(p)
+    assert _levels(w, "no longer being retried") == ["warn"]
+    assert not [x for x in w if x["level"] == "error"]
+
+
+def test_abandoned_uploads_do_not_also_trip_the_stalled_error():
+    """Regression guard for double-reporting: `stalled` is count - in_flight, and
+    `count` now excludes abandoned rows, so an abandoned upload must produce
+    exactly one message, at warn level, and no error."""
+    p = _payload()
+    p["uploads_pending"] = {
+        "count": 0, "in_flight": 0, "oldest_age_s": None, "abandoned": 2,
+    }
+    w = st.assess(p)
+    upload_msgs = [x for x in w if "never completed" in x["message"]]
+    assert len(upload_msgs) == 1, f"expected one upload message, got {upload_msgs}"
+    assert upload_msgs[0]["level"] == "warn"
+
+
+def test_a_recently_stalled_upload_is_still_an_error():
+    """The abandoned bucket must not swallow a genuinely stuck recent upload --
+    that is the case that still needs someone to look."""
+    p = _payload()
+    p["uploads_pending"] = {
+        "count": 1, "in_flight": 0, "oldest_age_s": 7200.0, "abandoned": 0,
+    }
+    assert _levels(st.assess(p), "never completed") == ["error"]
+
+
 def test_poor_signal_quality_warns():
     p = _payload()
     p["quality"] = {"minutes": 100, "good_minutes": 40}

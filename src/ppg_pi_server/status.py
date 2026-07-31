@@ -60,6 +60,14 @@ PAIR_TARGET = 20
 # calling that an error mid-session is a false alarm at the worst moment.
 UPLOAD_IN_FLIGHT_S = 15 * 60.0
 
+# Past this, an upload that never completed is treated as abandoned rather than
+# pending. Generous on purpose: a phone that is off, out of range, or waiting on
+# WiFi can legitimately take many hours to finish a bundle, and misfiling that as
+# abandoned would hide a real recovery in progress. Anything older than this has
+# not been retried by the phone at all -- the app's startup sweep re-enqueues
+# such bundles, so a genuinely recoverable one reappears as in-flight.
+UPLOAD_ABANDONED_S = 36 * 3600.0
+
 
 @dataclass
 class Subject:
@@ -419,10 +427,47 @@ def collect(
             ).fetchone()[0]
             or 0
         )
+        # An upload still open after this long is not slow, it is abandoned: the
+        # phone enqueues a session for upload exactly once and, before the
+        # startup sweep was added, nothing ever retried a job that exhausted its
+        # attempts. Three such rows from 2026-07-27 sat open for four days with
+        # no PPG ever staged. Counting them as "pending" forever makes
+        # pending.count permanently non-zero and oldest_age_s grow without
+        # bound, which is worse than useless -- it trains you to ignore the one
+        # number that should mean "something needs attention", and would mask a
+        # genuinely stuck upload arriving later.
+        abandoned = int(
+            con.execute(
+                f"""
+                SELECT count(*) FROM uploads
+                WHERE {up_clause} AND coalesce(status, '') <> 'complete'
+                  AND opened_at < ?
+                """,
+                [*up_params, now - UPLOAD_ABANDONED_S],
+            ).fetchone()[0]
+            or 0
+        )
+        # Oldest age of uploads that are still plausibly recoverable, so the
+        # figure reflects "how long has something been waiting" rather than
+        # "how long ago did we give up on something".
+        live_oldest_row = con.execute(
+            f"""
+            SELECT min(opened_at) FROM uploads
+            WHERE {up_clause} AND coalesce(status, '') <> 'complete'
+              AND opened_at >= ?
+            """,
+            [*up_params, now - UPLOAD_ABANDONED_S],
+        ).fetchone()
+        live_oldest = float(live_oldest_row[0]) if live_oldest_row[0] is not None else None
         pending = {
-            "count": n_pending,
-            "oldest_age_s": _age(oldest, now),
+            "count": n_pending - abandoned,
+            "oldest_age_s": _age(live_oldest, now),
             "in_flight": in_flight,
+            "abandoned": abandoned,
+            # Kept so nothing is silently hidden: the raw count and the age of
+            # the very oldest incomplete row are still reportable.
+            "total_incomplete": n_pending,
+            "oldest_incomplete_age_s": _age(oldest, now),
         }
 
     payload = {
@@ -688,6 +733,25 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 if pending["in_flight"] == 1
                 else f"{pending['in_flight']} uploads in progress",
                 "Started recently and still transferring.",
+            )
+        )
+
+    # Reported separately from `stalled` so that excluding these from the pending
+    # count does not silently hide them. Warn rather than error: the recording
+    # itself is not lost -- the phone never deletes local bundles -- and the
+    # recovery does not happen on the server, so an error here would be a
+    # permanent red mark that no server-side action can clear.
+    abandoned = pending.get("abandoned", 0)
+    if abandoned:
+        out.append(
+            Warning_(
+                "warn",
+                None,
+                f"{abandoned} upload never completed and is no longer being retried"
+                if abandoned == 1
+                else f"{abandoned} uploads never completed and are no longer being retried",
+                "The phone still holds the recording; it re-queues unsynced "
+                "bundles the next time the app is opened.",
             )
         )
 
