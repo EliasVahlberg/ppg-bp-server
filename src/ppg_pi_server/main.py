@@ -111,7 +111,13 @@ class _RecentErrorsHandler(logging.Handler):
 
 recent_errors = _RecentErrorsHandler()
 recent_errors.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
+    # Date included deliberately: this buffer survives for the life of the
+    # process (days), so a bare wall-clock time makes a warning from two days
+    # ago look like it happened minutes ago -- the exact misdiagnosis this
+    # endpoint exists to prevent.
+    logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%m-%d %H:%M:%S"
+    )
 )
 
 
