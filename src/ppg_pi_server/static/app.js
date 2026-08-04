@@ -77,12 +77,15 @@ function renderSubject(s) {
     '<div class="tiles">' +
     tile("Last recording", fmtAge(recAge), "", recState) +
     tile("Last cuff sync", fmtAge(cuffAge), "", cuffState) +
-    tile("Cuff buffer", est === null ? "-" : "~" + Math.round(est), "of 100", estState) +
+    tile("Cuff buffer", est === null ? "?" : "~" + Math.round(est), "of 100", estState) +
     tile("Pairs", fmtInt(s.pairs), "of 20", pairState) +
     "</div>" +
     '<p class="sub-detail">' + fmtInt(s.sessions) + " recordings, " + s.recorded_hours +
     " h. " + fmtInt(s.cuff_readings) + " cuff readings" +
-    (s.cuff_per_day ? " at " + s.cuff_per_day + "/day" : "") + ". " +
+    (s.cuff_per_day
+      ? " at " + s.cuff_per_day + "/day" +
+        (s.cuff_rate_span_days ? " over " + s.cuff_rate_span_days + " d" : "")
+      : "") + ". " +
     unpairedLine(s) + "</p>" +
     "</div>"
   );

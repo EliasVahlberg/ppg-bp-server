@@ -43,6 +43,23 @@ RECORDING_STALE_S = 48 * 3600
 #: Matches the app's red threshold for time since the last cuff transfer.
 CUFF_STALE_S = 14 * 24 * 3600
 
+# The observed reading rate is only allowed to predict buffer filling once it has
+# been measured over at least this long. Below it, no estimate is produced at all.
+#
+# Measuring is bursty: a calibration protocol produces tens of readings in a few
+# days, then nothing while the subject goes about their life. A rate taken from
+# such a burst and multiplied by wall-clock time predicts a full ring within days.
+# That happened on 2026-08-03 -- 30.5 readings/day measured over a 2-day
+# calibration burst predicted ~148 unsynced readings, and the sync that followed
+# found exactly one. Claiming unrecoverable data loss at error level on that basis
+# teaches the reader to ignore the warning, which costs the genuine overflow this
+# exists to catch.
+#
+# Two weeks is chosen to match CUFF_STALE_S: predicting how a 100-slot buffer
+# fills requires having watched for at least as long as the interval we already
+# treat as the longest acceptable gap between transfers.
+MIN_CUFF_RATE_SPAN_DAYS = 14.0
+
 #: Below this share of usable PPG minutes, the sensor placement or wear time is
 #: suspect rather than the analysis being unlucky.
 GOOD_MINUTE_SHARE_WARN = 0.70
@@ -81,6 +98,10 @@ class Subject:
     last_cuff_taken_at: str | None = None
     last_cuff_transfer_at: float | None = None
     cuff_per_day: float | None = None
+    # How long the rate above was observed over. Carried alongside the rate because
+    # a rate without its window cannot be judged: 30/day means one thing measured
+    # over a month and another measured over a two-day calibration burst.
+    cuff_rate_span_days: float | None = None
     pairs: int = 0
     # Why readings did not pair. "Pairs: 0" on its own is not actionable, and the
     # causes are very different: a mis-set cuff clock, a reading taken outside any
@@ -103,6 +124,9 @@ class Subject:
             "last_cuff_transfer_at": self.last_cuff_transfer_at,
             "last_cuff_transfer_age_s": _age(self.last_cuff_transfer_at, now),
             "cuff_per_day": self.cuff_per_day,
+            "cuff_rate_span_days": (
+                None if self.cuff_rate_span_days is None else round(self.cuff_rate_span_days, 2)
+            ),
             "pairs": self.pairs,
             "unpaired": {
                 "no_overlap": self.unpaired_no_overlap,
@@ -116,7 +140,7 @@ class Subject:
             "nearest_miss_s": self.nearest_miss_s,
         }
         d["estimated_unsynced_cuff"] = estimated_unsynced_cuff(
-            self.cuff_per_day, d["last_cuff_transfer_age_s"]
+            self.cuff_per_day, d["last_cuff_transfer_age_s"], self.cuff_rate_span_days
         )
         return d
 
@@ -125,15 +149,29 @@ def _age(then: float | None, now: float) -> float | None:
     return None if then is None else max(0.0, now - then)
 
 
-def estimated_unsynced_cuff(per_day: float | None, transfer_age_s: float | None) -> float | None:
+def estimated_unsynced_cuff(
+    per_day: float | None,
+    transfer_age_s: float | None,
+    rate_span_days: float | None = None,
+) -> float | None:
     """Readings the cuff has probably taken since the last transfer.
 
-    An estimate by necessity: the phone knows the cuff's unread count at read
-    time, but that number is not uploaded, so the server can only extrapolate
-    from the observed rate. Deliberately reported as an estimate rather than
-    presented as the true buffer state.
+    An extrapolation, not a measurement. The phone knows the cuff's unread count
+    at read time but does not upload it -- and note that the count of readings a
+    cuff sync delivers is the phone's whole cumulative local store, not the ring's
+    occupancy, so it cannot stand in for one either. The server can therefore only
+    project the observed rate forward.
+
+    Returns ``None`` unless the rate was measured over at least
+    ``MIN_CUFF_RATE_SPAN_DAYS``. Extrapolating a rate far beyond the window it was
+    observed in is not a weaker claim, it is an unfounded one: measuring is bursty,
+    so a short window almost always samples a calibration session rather than the
+    subject's habit. Reporting nothing is more useful than reporting a number that
+    is wrong by two orders of magnitude.
     """
     if per_day is None or transfer_age_s is None:
+        return None
+    if rate_span_days is None or rate_span_days < MIN_CUFF_RATE_SPAN_DAYS:
         return None
     return round(per_day * transfer_age_s / 86400.0, 1)
 
@@ -279,6 +317,7 @@ def collect(
             span_days = ((last_epoch or 0) - (first_epoch or 0)) / 86400.0
             if n and span_days > 0.5:
                 s.cuff_per_day = round(int(n) / span_days, 2)
+                s.cuff_rate_span_days = span_days
 
     # -- calibration pairs: a cuff reading whose corrected time falls inside a
     # -- recording from the same subject. Corrected time is taken_at minus
@@ -649,14 +688,23 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             )
         est = s.get("estimated_unsynced_cuff")
+        rate = s.get("cuff_per_day")
+        span = s.get("cuff_rate_span_days")
+        # Both messages name the rate and the window it came from. The number is a
+        # projection, and a reader who can see what it was projected from can judge
+        # it; one who cannot has to either trust it blindly or ignore it.
+        basis = ""
+        if rate is not None and span is not None:
+            basis = f" Projected from {rate:g}/day observed over {span:g} d."
         if est is not None and est >= CUFF_RING_SLOTS:
             out.append(
                 Warning_(
                     "error",
                     sid,
                     "Cuff buffer estimated full",
-                    f"~{est:g} readings since the last transfer, ring holds "
-                    f"{CUFF_RING_SLOTS}. Older readings are already unrecoverable.",
+                    f"~{est:g} readings estimated since the last transfer, ring "
+                    f"holds {CUFF_RING_SLOTS}. If the rate held, the oldest "
+                    f"readings have already been overwritten.{basis}",
                 )
             )
         elif est is not None and est >= CUFF_RING_SLOTS * CUFF_FILL_WARN:
@@ -666,7 +714,7 @@ def assess(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     sid,
                     "Cuff buffer filling",
                     f"~{est:g} of {CUFF_RING_SLOTS} slots estimated used since "
-                    "the last transfer.",
+                    f"the last transfer.{basis}",
                 )
             )
 

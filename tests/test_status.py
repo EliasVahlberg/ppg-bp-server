@@ -34,6 +34,7 @@ def _payload(**subject_over) -> dict:
         "last_cuff_transfer_at": NOW - 3600,
         "last_cuff_transfer_age_s": 3600.0,
         "cuff_per_day": 2.0,
+        "cuff_rate_span_days": 30.0,
         "pairs": 25,
         "estimated_unsynced_cuff": 0.1,
     }
@@ -71,11 +72,44 @@ def test_cuff_transfer_past_fourteen_days_is_an_error():
     assert _levels(w, "Cuff not transferred") == ["error"]
 
 
-def test_estimated_full_ring_is_an_error_about_unrecoverable_data():
+def test_estimated_full_ring_is_an_error_about_overwritten_data():
     w = st.assess(_payload(estimated_unsynced_cuff=120.0))
     hit = [x for x in w if "buffer estimated full" in x["message"]]
     assert hit and hit[0]["level"] == "error"
-    assert "unrecoverable" in hit[0]["detail"]
+    assert "overwritten" in hit[0]["detail"]
+
+
+def test_buffer_warnings_name_the_rate_and_window_they_came_from():
+    """A projection the reader cannot audit is one they can only obey or ignore."""
+    w = st.assess(_payload(estimated_unsynced_cuff=120.0, cuff_per_day=4.0,
+                           cuff_rate_span_days=30.0))
+    hit = [x for x in w if "buffer estimated full" in x["message"]]
+    assert "4/day observed over 30 d" in hit[0]["detail"]
+
+
+def test_short_observation_window_produces_no_estimate():
+    """Regression: her 2026-08-03 numbers, which predicted ~148 and found 1.
+
+    30.54 readings/day was real, but it was measured over a 2-day calibration
+    burst. Projected across a 5-day gap it claimed the 100-slot ring had already
+    overflowed. The sync that followed returned one new reading.
+    """
+    assert st.estimated_unsynced_cuff(30.54, 5 * DAY, 2.06) is None
+
+
+def test_rate_measured_long_enough_still_extrapolates():
+    """The guard must not disable the warning it exists to keep honest."""
+    assert st.estimated_unsynced_cuff(6.0, 20 * DAY, 30.0) == 120.0
+
+
+def test_estimate_requires_a_window_at_the_boundary():
+    assert st.estimated_unsynced_cuff(4.0, 10 * DAY, st.MIN_CUFF_RATE_SPAN_DAYS) == 40.0
+    assert st.estimated_unsynced_cuff(4.0, 10 * DAY, st.MIN_CUFF_RATE_SPAN_DAYS - 0.01) is None
+
+
+def test_missing_window_produces_no_estimate():
+    """An unknown window is not a long one."""
+    assert st.estimated_unsynced_cuff(4.0, 10 * DAY, None) is None
 
 
 def test_filling_ring_warns_before_it_overflows():
@@ -178,16 +212,20 @@ def test_errors_sort_before_warnings_and_info():
 
 
 @pytest.mark.parametrize(
-    "per_day,age_s,expected",
+    "per_day,age_s,span_days,expected",
     [
-        (2.0, 10 * DAY, 20.0),
-        (None, 10 * DAY, None),
-        (2.0, None, None),
-        (0.0, 10 * DAY, 0.0),
+        (2.0, 10 * DAY, 30.0, 20.0),
+        (None, 10 * DAY, 30.0, None),
+        (2.0, None, 30.0, None),
+        (0.0, 10 * DAY, 30.0, 0.0),
+        # A rate with no window behind it yields nothing, by design: the default
+        # is the safe one, so a caller that forgets to pass a window gets silence
+        # rather than an unfounded projection.
+        (2.0, 10 * DAY, None, None),
     ],
 )
-def test_unsynced_estimate(per_day, age_s, expected):
-    assert st.estimated_unsynced_cuff(per_day, age_s) == expected
+def test_unsynced_estimate(per_day, age_s, span_days, expected):
+    assert st.estimated_unsynced_cuff(per_day, age_s, span_days) == expected
 
 
 # ---------------------------------------------------------------------------
