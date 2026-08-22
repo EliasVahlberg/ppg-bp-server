@@ -280,6 +280,18 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
       reached and used" signal -- a store that opens fine but hasn't received
       anything in days is a different problem than a locked store, and this
       endpoint could not previously tell the two apart.
+    - ``data_status`` / ``hours_since_ingest``: the same signal, judged rather
+      than merely reported. Reporting the timestamp was not enough in practice:
+      on 2026-08-08 the phone left the tailnet and uploads stopped for 14 days
+      while this endpoint returned 200/``db=ok`` the whole time, because the
+      server really was fine. The monitor gated on ``db`` alone and stayed
+      green, so nobody noticed until someone thought to read the timestamp.
+
+    A stale store still returns **200 with** ``db="ok"``, not 503. "I cannot
+    reach the store" and "the store is fine but nothing is arriving" need
+    different responses from a human, and collapsing both into one red state
+    would lose that -- the widget is expected to render ``data_status`` as its
+    own indicator rather than folding it into the up/down verdict.
 
     No auth: same reasoning as ``GET /`` above -- low-sensitivity (booleans, a
     millisecond count, timestamps, and log lines that are operational, not
@@ -334,9 +346,68 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
             "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
             "last_ingest_at": last_ingest_at,
             "last_cuff_sync_at": last_cuff_sync_at,
+            **_data_freshness(
+                last_ingest_at,
+                last_cuff_sync_at,
+                settings.data_stale_hours,
+                settings.data_critical_hours,
+            ),
             "recent_warnings": warnings,
         }
     )
+
+
+def _hours_since(iso_ts: str | None, now: datetime) -> float | None:
+    """Whole-ish hours between an ISO-8601 UTC timestamp and ``now`` (or None)."""
+    if iso_ts is None:
+        return None
+    try:
+        then = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return round((now - then).total_seconds() / 3600.0, 1)
+
+
+def _data_freshness(
+    last_ingest_at: str | None,
+    last_cuff_sync_at: str | None,
+    stale_hours: float,
+    critical_hours: float,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Classify how long it has been since real data arrived.
+
+    Split out as a pure function so the thresholds can be tested without
+    standing up a store or faking a clock inside the endpoint.
+
+    ``data_status`` is graded on ingest only, not on cuff sync. Cuff uploads
+    are enqueued solely by a manual "Read Cuff" in the app -- there is no
+    periodic sync (android#11) -- so cuff staleness routinely reaches days
+    without anything being wrong, and folding it into the overall verdict
+    would make the verdict meaningless. ``hours_since_cuff_sync`` is still
+    reported so a human can judge it.
+
+    Note this measures *arrival*, not recording: a phone that records happily
+    while offline looks identical to one that records nothing. Distinguishing
+    those needs a signal from the phone itself, which does not exist yet.
+    """
+    now = now or datetime.now(tz=timezone.utc)
+    hours_ingest = _hours_since(last_ingest_at, now)
+    if hours_ingest is None:
+        status = "never"
+    elif hours_ingest >= critical_hours:
+        status = "critical"
+    elif hours_ingest >= stale_hours:
+        status = "stale"
+    else:
+        status = "fresh"
+    return {
+        "data_status": status,
+        "hours_since_ingest": hours_ingest,
+        "hours_since_cuff_sync": _hours_since(last_cuff_sync_at, now),
+    }
 
 
 def _last_activity(con: duckdb.DuckDBPyConnection) -> tuple[str | None, str | None]:

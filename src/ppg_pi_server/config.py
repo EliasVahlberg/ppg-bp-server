@@ -81,6 +81,38 @@ class Settings(BaseSettings):
         description="Maximum upload size per request. ~200MB == 1h of calibration profile compressed.",
     )
 
+    # Monitoring
+    #
+    # A healthy-but-idle server is indistinguishable from a working one on a
+    # liveness probe alone: on 2026-08-08 the patient's phone dropped off the
+    # tailnet and uploads stopped, while /healthz kept returning 200/db=ok for
+    # 14 days because the server itself was genuinely fine. These thresholds
+    # let the probe say "reachable but nothing is arriving", which is a
+    # different fault with a different fix.
+    #
+    # Defaults are deliberately loose. Recording is not daily and cuff sync is
+    # manual (there is no periodic cuff upload yet), so a tight threshold would
+    # sit amber most of the time and get ignored -- which is worse than not
+    # reporting at all.
+    data_stale_hours: float = Field(
+        default=72.0,
+        description=(
+            "Hours since the last successful ingest after which data is "
+            "reported as 'stale'. Chosen above the longest routine gap "
+            "observed so far (the 2026-07-30..08-05 pause) so that normal "
+            "irregularity does not raise a false alarm."
+        ),
+    )
+    data_critical_hours: float = Field(
+        default=240.0,
+        description=(
+            "Hours since the last successful ingest after which data is "
+            "reported as 'critical' -- long enough that a cause other than "
+            "routine irregularity (offline phone, dead sensor, stopped app) "
+            "is the likely explanation."
+        ),
+    )
+
     tailnet_identity: bool = Field(
         default=False,
         description=(

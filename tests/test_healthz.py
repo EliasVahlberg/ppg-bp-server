@@ -208,3 +208,97 @@ def test_healthz_recovers_once_the_lock_is_released(client: TestClient) -> None:
     ok_resp = client.get("/healthz")
     assert ok_resp.status_code == 200
     assert ok_resp.json()["db"] == "ok"
+
+
+# --- data freshness -------------------------------------------------------
+#
+# Added after 2026-08-08..08-22: the patient's phone left the tailnet, uploads
+# stopped for 14 days, and /healthz returned 200/db=ok throughout because the
+# server itself was healthy. Reporting last_ingest_at was not enough -- the
+# monitor gated on `db` alone and stayed green. These cover the judgement, not
+# just the timestamp.
+
+
+def _freshness(hours_ago: float | None, stale: float = 72.0, critical: float = 240.0) -> dict:
+    """Classify a synthetic 'last ingest' that many hours in the past."""
+    from datetime import timedelta, timezone as _tz
+
+    from ppg_pi_server.main import _data_freshness
+
+    now = datetime(2026, 8, 22, 8, 0, tzinfo=_tz.utc)
+    iso = None if hours_ago is None else (now - timedelta(hours=hours_ago)).isoformat()
+    return _data_freshness(iso, None, stale, critical, now=now)
+
+
+def test_freshness_fresh_below_the_stale_threshold() -> None:
+    assert _freshness(1.0)["data_status"] == "fresh"
+    assert _freshness(71.9)["data_status"] == "fresh"
+
+
+def test_freshness_stale_at_and_above_the_threshold() -> None:
+    """Boundary is inclusive: exactly at the threshold counts as stale, so a
+    threshold of 72h means 'three days with nothing', not 'more than'."""
+    assert _freshness(72.0)["data_status"] == "stale"
+    assert _freshness(100.0)["data_status"] == "stale"
+    assert _freshness(239.9)["data_status"] == "stale"
+
+
+def test_freshness_critical_at_and_above_the_threshold() -> None:
+    assert _freshness(240.0)["data_status"] == "critical"
+    # The real incident: 14 days offline.
+    assert _freshness(14 * 24)["data_status"] == "critical"
+
+
+def test_freshness_never_when_nothing_has_ever_arrived() -> None:
+    """A fresh store must not read as 'critical' -- 'never ingested' is a
+    setup state, not a fault, and conflating them would make every new
+    deployment look broken."""
+    out = _freshness(None)
+    assert out["data_status"] == "never"
+    assert out["hours_since_ingest"] is None
+
+
+def test_freshness_reports_elapsed_hours() -> None:
+    assert _freshness(48.0)["hours_since_ingest"] == pytest.approx(48.0, abs=0.2)
+
+
+def test_freshness_verdict_ignores_cuff_sync_age() -> None:
+    """Cuff uploads only happen on a manual Read Cuff (no periodic sync,
+    android#11), so cuff staleness of days is normal and must not drive the
+    overall verdict -- but it is still reported for a human to weigh."""
+    from datetime import timedelta, timezone as _tz
+
+    from ppg_pi_server.main import _data_freshness
+
+    now = datetime(2026, 8, 22, 8, 0, tzinfo=_tz.utc)
+    fresh_ingest = (now - timedelta(hours=1)).isoformat()
+    ancient_cuff = (now - timedelta(days=30)).isoformat()
+    out = _data_freshness(fresh_ingest, ancient_cuff, 72.0, 240.0, now=now)
+    assert out["data_status"] == "fresh"
+    assert out["hours_since_cuff_sync"] == pytest.approx(720.0, abs=1.0)
+
+
+def test_freshness_tolerates_a_naive_timestamp() -> None:
+    """Defensive: a store written by an older build could hold a timestamp
+    without tzinfo. Treat it as UTC rather than raising inside a health probe."""
+    from datetime import timezone as _tz
+
+    from ppg_pi_server.main import _data_freshness
+
+    now = datetime(2026, 8, 22, 8, 0, tzinfo=_tz.utc)
+    out = _data_freshness("2026-08-22T06:00:00", None, 72.0, 240.0, now=now)
+    assert out["hours_since_ingest"] == pytest.approx(2.0, abs=0.2)
+
+
+def test_healthz_includes_freshness_fields_and_stays_200_when_stale() -> None:
+    """A stale store is reachable, so it must not masquerade as an outage:
+    'cannot read the store' and 'store is fine, nothing arriving' need
+    different human responses."""
+    with TestClient(app) as c:
+        r = c.get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["db"] == "ok"
+    for key in ("data_status", "hours_since_ingest", "hours_since_cuff_sync"):
+        assert key in body
+    assert body["data_status"] in {"fresh", "stale", "critical", "never"}
