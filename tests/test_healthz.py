@@ -302,3 +302,37 @@ def test_healthz_includes_freshness_fields_and_stays_200_when_stale() -> None:
     for key in ("data_status", "hours_since_ingest", "hours_since_cuff_sync"):
         assert key in body
     assert body["data_status"] in {"fresh", "stale", "critical", "never"}
+
+
+def test_healthz_counts_stuck_and_failed_conversions() -> None:
+    """/complete now answers before converting, so a conversion that fails
+    afterwards has no client left to report to. These counters are the only
+    route to a human: an upload stuck in 'converting' means the bytes landed
+    but the store never got them, which looks identical to an idle phone in
+    every other field (last_ingest_at simply stops moving)."""
+    db_path = Path(os.environ["PPG_PI_SERVER_DB_PATH"])
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(
+            "INSERT INTO uploads (phone_session_uuid, uploader_phone_id, "
+            "opened_at, status) VALUES ('stuck-uuid', 'phone-01', ?, 'converting')",
+            [1_785_300_000.0],
+        )
+        con.execute(
+            "INSERT INTO uploads (phone_session_uuid, uploader_phone_id, "
+            "opened_at, status) VALUES ('broken-uuid', 'phone-01', ?, 'error')",
+            [1_785_300_000.0],
+        )
+    finally:
+        con.close()
+
+    with TestClient(app) as c:
+        body = c.get("/healthz").json()
+    assert body["conversions_pending"] >= 1
+    assert body["conversions_failed"] >= 1
+
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute("DELETE FROM uploads WHERE phone_session_uuid IN ('stuck-uuid', 'broken-uuid')")
+    finally:
+        con.close()

@@ -240,6 +240,36 @@ class Ingestor:
 
     # ----------------------------------------------------------- convert
 
+    def assert_ready_to_convert(self, phone_session_uuid: str) -> None:
+        """Cheap pre-flight for the deferred-conversion path.
+
+        When /complete answers before converting, the response can no longer
+        carry a conversion failure -- so the checks that are cheap enough to do
+        synchronously must still happen synchronously, or a bundle with no
+        manifest would get a 200 and the client would mark it synced and stop
+        retrying. This is deliberately only the fast subset: anything requiring
+        a read of the ROP files belongs in the conversion itself.
+        """
+        bdir = self._bundle_dir(phone_session_uuid)
+        if not (bdir / "manifest.json").is_file():
+            raise IngestError("No manifest.json staged for this session")
+
+    def mark_converting(self, phone_session_uuid: str) -> None:
+        """Move an upload from 'open' to 'converting'.
+
+        Gives the backlog a name: an upload stuck in 'converting' means the
+        bytes arrived and the conversion did not finish, which is a different
+        problem from 'open' (upload never completed) or 'error' (conversion ran
+        and failed). /healthz counts these so a deferred conversion cannot fail
+        silently now that the client is told "done" before it runs.
+        """
+        with self._lock, self._connect() as con:
+            con.execute(
+                "UPDATE uploads SET status = 'converting' "
+                "WHERE phone_session_uuid = ?",
+                [phone_session_uuid],
+            )
+
     def complete(self, *, phone_session_uuid: str) -> CompleteResult:
         """Convert the staged bundle into the canonical store."""
         bdir = self._bundle_dir(phone_session_uuid)

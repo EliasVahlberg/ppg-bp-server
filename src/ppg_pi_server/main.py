@@ -53,7 +53,7 @@ from fastapi import (
     Request,
 )
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .auth import require_bearer
 from .config import Settings, get_settings
@@ -201,11 +201,17 @@ class UploadResponse(BaseModel):
 class CompleteResponse(BaseModel):
     phone_session_uuid: str
     status: str
-    db_session_id: int
-    samples_per_sensor: dict
-    segments: int
-    notes: int
-    rop_files: int
+    # Optional because the deferred path answers before conversion has run, so
+    # there is no db id or row count to report yet. status distinguishes the
+    # two cases: "complete" (converted inline) vs "converting" (accepted, will
+    # be converted in the background). The Android client ignores this body
+    # entirely -- it treats any 2xx as success -- so the optionality exists for
+    # human and test consumers, not for it.
+    db_session_id: int | None = None
+    samples_per_sensor: dict = Field(default_factory=dict)
+    segments: int | None = None
+    notes: int | None = None
+    rop_files: int | None = None
 
 
 class CuffReadingIn(BaseModel):
@@ -315,6 +321,7 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
         try:
             con.execute("SELECT 1").fetchone()
             last_ingest_at, last_cuff_sync_at = _last_activity(con)
+            backlog = _conversion_backlog(con)
         finally:
             con.close()
     except (duckdb.IOException, duckdb.ConnectionException) as exc:
@@ -352,9 +359,34 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
                 settings.data_stale_hours,
                 settings.data_critical_hours,
             ),
+            **backlog,
             "recent_warnings": warnings,
         }
     )
+
+
+def _conversion_backlog(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    """Counts of uploads whose conversion has not succeeded.
+
+    Necessary because /complete now answers before converting: the client is
+    told "done" and stops retrying, so a conversion that fails afterwards has
+    no other route to a human. 'converting' that never clears means the bytes
+    landed but the store never got them, which is invisible in every other
+    field here -- last_ingest_at simply stays where it was, which looks the same
+    as an idle phone.
+    """
+    out = {"conversions_pending": 0, "conversions_failed": 0}
+    try:
+        rows = con.execute(
+            "SELECT status, count(*) FROM uploads "
+            "WHERE status IN ('converting', 'error') GROUP BY status"
+        ).fetchall()
+    except duckdb.Error:
+        return out
+    for status, n in rows:
+        key = "conversions_pending" if status == "converting" else "conversions_failed"
+        out[key] = int(n)
+    return out
 
 
 def _hours_since(iso_ts: str | None, now: datetime) -> float | None:
@@ -554,6 +586,27 @@ async def complete(
         raise HTTPException(404, "Unknown session")
     logger.info("complete requested: uuid=%s phone=%s",
                 phone_session_uuid[:8], auth["phone_id"])
+
+    if settings.convert_async:
+        # Answer before converting. See Settings.convert_async for why this is
+        # safe and why it was needed: conversion of a long session outruns the
+        # client's 60s readTimeout, and the client's response to a timeout is to
+        # re-upload the entire bundle.
+        try:
+            ingestor.assert_ready_to_convert(phone_session_uuid)
+        except IngestError as exc:
+            logger.error("complete FAILED (pre-flight): uuid=%s err=%s",
+                         phone_session_uuid[:8], exc)
+            raise HTTPException(400, str(exc)) from exc
+        ingestor.mark_converting(phone_session_uuid)
+        background.add_task(_convert_in_background, ingestor, phone_session_uuid)
+        logger.info("complete ACCEPTED: uuid=%s (converting in background)",
+                    phone_session_uuid[:8])
+        return CompleteResponse(
+            phone_session_uuid=phone_session_uuid,
+            status="converting",
+        )
+
     try:
         res = ingestor.complete(phone_session_uuid=phone_session_uuid)
     except IngestError as exc:
@@ -577,6 +630,29 @@ async def complete(
         notes=res.notes,
         rop_files=res.rop_files,
     )
+
+
+def _convert_in_background(ingestor: Ingestor, phone_session_uuid: str) -> None:
+    """Run conversion after the response has been sent.
+
+    Defined as a plain ``def`` on purpose: Starlette runs sync background tasks
+    in a worker thread, so a 270-second CPU-bound conversion does not block the
+    event loop (an ``async def`` here would stall every other request for the
+    duration). ``Ingestor.complete`` already serialises on its own lock, so
+    overlapping conversions queue rather than colliding on DuckDB's
+    single-writer constraint.
+
+    Swallows the exception because there is no longer a client to return it to:
+    the response went out already. ``Ingestor.complete`` has set the upload's
+    status to 'error' and logged with a traceback by this point, which puts it
+    in /healthz's recent_warnings and in the conversions_failed count -- that is
+    the whole reason those counters exist.
+    """
+    try:
+        ingestor.complete(phone_session_uuid=phone_session_uuid)
+    except Exception as exc:  # noqa: BLE001 - nowhere to propagate to
+        logger.error("background conversion FAILED: uuid=%s err=%s",
+                     phone_session_uuid[:8], exc)
 
 
 @app.get("/api/v1/sessions")

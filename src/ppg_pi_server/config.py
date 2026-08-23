@@ -81,8 +81,42 @@ class Settings(BaseSettings):
         description="Maximum upload size per request. ~200MB == 1h of calibration profile compressed.",
     )
 
-    # Monitoring
+    # Ingest
     #
+    # Conversion of a staged bundle is CPU-bound and scales with recording
+    # length: a 6.5h session takes ~75s, a 24h session ~270s. The Android
+    # client's readTimeout is 60s, so any long session times out client-side
+    # even though the server goes on to succeed. The client then never writes
+    # its .synced marker and re-uploads the whole bundle on the next attempt.
+    # Observed 2026-08-23: one session uploaded 6 times and another 4 times,
+    # ~11 GB of redundant transfer over a weak 2.4 GHz link, and it would have
+    # repeated indefinitely because a permanently-failed WorkManager job is
+    # picked up again by findUnsynced on the next app start.
+    #
+    # Converting in the background lets /complete answer in milliseconds, which
+    # the *already-installed* client accepts (it treats any 2xx as success and
+    # ignores the body), so this fixes the loop with no app release.
+    #
+    # This is safe because the client's job is to get the bytes to the server,
+    # and that is already done and durable when /complete is called: the staged
+    # ROP files are on disk and kept (keep_raw_uploads). Conversion is a purely
+    # local derivation from them and can be retried server-side without the
+    # phone. Note the corollary: last_ingest_at still only moves when
+    # conversion finishes, so freshness keeps meaning "data is in the store",
+    # and a conversion that fails after the 200 must not be silent -- hence the
+    # conversions_pending/conversions_failed counters on /healthz.
+    convert_async: bool = Field(
+        default=True,
+        description=(
+            "If True, POST /complete validates the staged bundle, returns "
+            "immediately, and converts in a background task. Set False to "
+            "convert inline (the old behaviour) -- useful in tests and when "
+            "you want the response to carry the resulting db_session_id."
+        ),
+    )
+
+    # Monitoring
+
     # A healthy-but-idle server is indistinguishable from a working one on a
     # liveness probe alone: on 2026-08-08 the patient's phone dropped off the
     # tailnet and uploads stopped, while /healthz kept returning 200/db=ok for

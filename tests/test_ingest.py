@@ -15,6 +15,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
+import duckdb
 import pytest
 from fastapi.testclient import TestClient
 
@@ -164,6 +165,14 @@ class TestUpload:
 
 class TestComplete:
     def test_full_round_trip(self, client):
+        """The default path defers conversion, so /complete reports acceptance
+        rather than results -- but the rows must still land.
+
+        Asserting on the store rather than the response body is the stronger
+        check anyway: it is what the client's .synced marker is really claiming.
+        (TestClient runs background tasks before returning, so the conversion
+        has finished by the time this assertion runs.)
+        """
         sid = str(uuid.uuid4())
         _open(client, sid)
         files = _build_bundle(sid, ppg_n=40, acc_n=12)
@@ -171,17 +180,60 @@ class TestComplete:
             assert _put(client, sid, name, data).status_code == 200
         r = client.post(f"/api/v1/sessions/{sid}/complete", headers=AUTH)
         assert r.status_code == 200, r.text
-        body = r.json()
+        assert r.json()["status"] == "converting"
+
+        db_path = Path(os.environ["PPG_PI_SERVER_DB_PATH"])
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            sess = con.execute(
+                "SELECT id FROM sessions WHERE session_uuid = ?", [sid]
+            ).fetchone()
+            assert sess is not None, "background conversion did not insert the session"
+            n_ppg = con.execute(
+                "SELECT count(*) FROM ppg WHERE session_id = ?", [sess[0]]
+            ).fetchone()[0]
+            n_acc = con.execute(
+                "SELECT count(*) FROM acc WHERE session_id = ?", [sess[0]]
+            ).fetchone()[0]
+            status = con.execute(
+                "SELECT status FROM uploads WHERE phone_session_uuid = ?", [sid]
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert n_ppg == 40
+        assert n_acc == 12
+        assert status == "complete", "upload should clear out of the backlog"
+
+    def test_complete_inline_still_reports_results(self, client, monkeypatch):
+        """convert_async=False keeps the old synchronous contract, including the
+        db id and row counts in the response. Kept working because it is the
+        path you want when debugging a conversion by hand.
+
+        get_settings() builds a fresh Settings per request and is deliberately
+        not memoized, so setting the env var is enough to flip the path.
+        """
+        monkeypatch.setenv("PPG_PI_SERVER_CONVERT_ASYNC", "false")
+        sid = str(uuid.uuid4())
+        _open(client, sid)
+        files = _build_bundle(sid, ppg_n=40, acc_n=12)
+        for name, data in files.items():
+            assert _put(client, sid, name, data).status_code == 200
+        body = client.post(f"/api/v1/sessions/{sid}/complete", headers=AUTH).json()
         assert body["status"] == "complete"
         assert body["samples_per_sensor"]["ppg"] == 40
         assert body["samples_per_sensor"]["acc"] == 12
         assert body["rop_files"] == 2
         assert body["db_session_id"] >= 1
 
-    def test_complete_without_manifest_400(self, client):
+    def test_complete_without_manifest_400_before_accepting(self, client):
+        """The pre-flight check must run *before* the 200.
+
+        This is the case that makes deferral risky: the client treats any 2xx as
+        permission to write .synced and stop retrying, so accepting a bundle
+        that can never convert would strand it silently on the phone.
+        """
         sid = str(uuid.uuid4())
         _open(client, sid)
-        # stage only a rop file, no manifest
         files = _build_bundle(sid)
         _put(client, sid, "ppg_000.rop", files["ppg_000.rop"])
         r = client.post(f"/api/v1/sessions/{sid}/complete", headers=AUTH)
