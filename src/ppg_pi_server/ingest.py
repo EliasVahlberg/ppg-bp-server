@@ -19,6 +19,8 @@ import hashlib
 import json
 import logging
 import re
+import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -270,6 +272,34 @@ class Ingestor:
                 [phone_session_uuid],
             )
 
+    # Generous rather than tight: a 24h session legitimately takes ~270s, and
+    # killing a conversion that was merely slow would strand the bundle with the
+    # client already told "done". An hour is far past any plausible real
+    # conversion, so hitting it means genuinely stuck, not merely large.
+    CONVERT_TIMEOUT_S = 3600
+
+    def _convert_out_of_process(self, bundle_dir: Path) -> converter.ConversionStats:
+        """Convert in a child process.
+
+        Not just off the event loop -- out of the process entirely. DuckDB
+        refuses two configurations for one file within a process, and /healthz
+        holds the store read-only while conversion needs it read-write. See
+        convert_worker for the full reasoning and the failure it fixes.
+        """
+        proc = subprocess.run(
+            [sys.executable, "-m", "ppg_pi_server.convert_worker",
+             str(bundle_dir), str(self.db_path)],
+            capture_output=True,
+            text=True,
+            timeout=self.CONVERT_TIMEOUT_S,
+        )
+        if proc.returncode != 0:
+            raise IngestError(
+                proc.stderr.strip()
+                or f"converter subprocess exited {proc.returncode}"
+            )
+        return converter.ConversionStats(**json.loads(proc.stdout))
+
     def complete(self, *, phone_session_uuid: str) -> CompleteResult:
         """Convert the staged bundle into the canonical store."""
         bdir = self._bundle_dir(phone_session_uuid)
@@ -279,7 +309,7 @@ class Ingestor:
         t0 = time.time()
         with self._lock:
             try:
-                stats = converter.convert_session(bdir, self.db_path, append=True)
+                stats = self._convert_out_of_process(bdir)
             except Exception as exc:  # noqa: BLE001 - surface as ingest failure
                 logger.error("conversion FAILED: uuid=%s elapsed=%.1fs err=%s",
                              phone_session_uuid[:8], time.time() - t0, exc,

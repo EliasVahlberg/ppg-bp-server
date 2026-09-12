@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import duckdb
 import pytest
 
 from ppg_pi_server import series
 from ppg_pi_server.schema import init_audit_schema, init_cuff_schema
 
-NOW_ISH = 1_785_000_000.0
+# Anchored to the current day, not a fixed epoch. It used to be the literal
+# 1_785_000_000.0 (2026-07-25), which meant every test here silently started
+# failing once that date fell outside the queries' 30-day window -- the suite had
+# been red for weeks purely from the passage of time, which is exactly the
+# condition that hides a real regression.
+#
+# Midday rather than "now" so a run near midnight cannot split fixture rows
+# across two days and break the per-day grouping assertions.
+NOW_ISH = datetime.now().replace(
+    hour=12, minute=0, second=0, microsecond=0
+).timestamp()
 
 
 @pytest.fixture
