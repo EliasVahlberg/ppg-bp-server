@@ -33,7 +33,7 @@ os.environ["PPG_PI_SERVER_UPLOAD_DIR"] = str(_DATA_DIR / "uploads")
 os.environ["PPG_PI_SERVER_TOKENS_FILE"] = str(_DATA_DIR / "tokens.json")
 (_DATA_DIR / "tokens.json").write_text(json.dumps({}))
 
-from ppg_pi_server import main
+from ppg_pi_server import main  # noqa: E402  (after env setup)
 from ppg_pi_server.main import app  # noqa: E402  (after env setup)
 
 
