@@ -20,6 +20,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from unittest import mock
+
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +33,7 @@ os.environ["PPG_PI_SERVER_UPLOAD_DIR"] = str(_DATA_DIR / "uploads")
 os.environ["PPG_PI_SERVER_TOKENS_FILE"] = str(_DATA_DIR / "tokens.json")
 (_DATA_DIR / "tokens.json").write_text(json.dumps({}))
 
+from ppg_pi_server import main
 from ppg_pi_server.main import app  # noqa: E402  (after env setup)
 
 
@@ -336,3 +339,61 @@ def test_healthz_counts_stuck_and_failed_conversions() -> None:
         con.execute("DELETE FROM uploads WHERE phone_session_uuid IN ('stuck-uuid', 'broken-uuid')")
     finally:
         con.close()
+
+
+def test_healthz_reports_ok_while_its_own_conversion_holds_the_lock() -> None:
+    """A conversion in progress is normal operation, not an outage.
+
+    Conversion runs in a child process holding the store's write lock for
+    70-270s, and DuckDB refuses a read-only open in that window. Reported
+    naively that is a 503, i.e. every upload looks like a multi-minute outage
+    on the widget. The cached timestamps are the current truth here rather than
+    stale data, because last_ingest_at only advances once a conversion finishes.
+    """
+    with TestClient(app) as c:
+        # Prime the cache with a real read.
+        assert c.get("/healthz").status_code == 200
+
+        ingestor = app.state.ingestor
+        original = ingestor._converting_uuid
+        ingestor._converting_uuid = "af1ff51f-dead-beef-0000-000000000000"
+        try:
+            with mock.patch.object(
+                main.duckdb, "connect",
+                side_effect=main.duckdb.IOException("Conflicting lock is held"),
+            ):
+                r = c.get("/healthz")
+        finally:
+            ingestor._converting_uuid = original
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["db"] == "ok"
+    assert body["converting"] == "af1ff51f"
+    assert body["conversions_pending"] == 1
+    # Omitted rather than guessed at: it lives in the unreadable store.
+    assert "conversions_failed" not in body
+
+
+def test_healthz_still_503s_when_locked_without_a_conversion() -> None:
+    """The 2026-07-27 case must keep reporting a fault.
+
+    A lock held by something that is *not* our conversion -- the dashboard
+    leaking one, say -- is the original reason this endpoint exists, and must
+    not be swallowed by the conversion-aware branch.
+    """
+    with TestClient(app) as c:
+        ingestor = app.state.ingestor
+        original = ingestor._converting_uuid
+        ingestor._converting_uuid = None
+        try:
+            with mock.patch.object(
+                main.duckdb, "connect",
+                side_effect=main.duckdb.IOException("Conflicting lock is held"),
+            ):
+                r = c.get("/healthz")
+        finally:
+            ingestor._converting_uuid = original
+
+    assert r.status_code == 503
+    assert r.json()["db"] == "locked"

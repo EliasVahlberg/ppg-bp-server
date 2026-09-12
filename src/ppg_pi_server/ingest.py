@@ -73,6 +73,17 @@ class Ingestor:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        # Which session, if any, is being converted right now.
+        #
+        # Lets /healthz tell "our own child process holds the store's write
+        # lock" apart from "the store is broken". DuckDB refuses a read-only
+        # open while another process holds the write lock, so during a
+        # conversion the probe's open fails -- and without this it would report
+        # 503 for the 70-270s a real conversion takes, turning every upload into
+        # an apparent outage. A plain attribute rather than a lock-guarded one:
+        # it is written by the single conversion path (already serialised by
+        # _lock) and only ever read for reporting.
+        self._converting_uuid: str | None = None
         with self._connect() as con:
             init_audit_schema(con)
             init_cuff_schema(con)
@@ -242,6 +253,15 @@ class Ingestor:
 
     # ----------------------------------------------------------- convert
 
+    @property
+    def converting_uuid(self) -> str | None:
+        """The session being converted right now, or None.
+
+        Read by /healthz so that "our own child process holds the write lock"
+        is not reported as "the store is unreachable".
+        """
+        return self._converting_uuid
+
     def assert_ready_to_convert(self, phone_session_uuid: str) -> None:
         """Cheap pre-flight for the deferred-conversion path.
 
@@ -307,6 +327,7 @@ class Ingestor:
             raise IngestError("No manifest.json staged for this session")
         logger.info("converting bundle: uuid=%s dir=%s", phone_session_uuid[:8], bdir)
         t0 = time.time()
+        self._converting_uuid = phone_session_uuid
         with self._lock:
             try:
                 stats = self._convert_out_of_process(bdir)
@@ -320,6 +341,7 @@ class Ingestor:
                         "WHERE phone_session_uuid = ?",
                         [phone_session_uuid],
                     )
+                self._converting_uuid = None
                 raise IngestError(f"Conversion failed: {exc}") from exc
             elapsed = time.time() - t0
             logger.info("conversion OK: uuid=%s db_id=%d elapsed=%.1fs "
@@ -347,6 +369,7 @@ class Ingestor:
                     "convert_stats_json = ? WHERE phone_session_uuid = ?",
                     [time.time(), stats_json, phone_session_uuid],
                 )
+        self._converting_uuid = None
         return CompleteResult(
             phone_session_uuid=phone_session_uuid,
             db_session_id=stats.db_session_id,

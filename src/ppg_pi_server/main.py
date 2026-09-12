@@ -256,7 +256,10 @@ async def health() -> dict:
 
 
 @app.get("/healthz")
-async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONResponse:
+async def healthz(
+    settings: Annotated[Settings, Depends(get_settings)],
+    ingestor: Annotated[Ingestor, Depends(get_ingestor)],
+) -> JSONResponse:
     """Deeper liveness probe: touch the DuckDB store and report what's actually
     been happening, not just whether a trivial query succeeds.
 
@@ -322,6 +325,8 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
             con.execute("SELECT 1").fetchone()
             last_ingest_at, last_cuff_sync_at = _last_activity(con)
             backlog = _conversion_backlog(con)
+            _LAST_ACTIVITY_CACHE["last_ingest_at"] = last_ingest_at
+            _LAST_ACTIVITY_CACHE["last_cuff_sync_at"] = last_cuff_sync_at
         finally:
             con.close()
     except (duckdb.IOException, duckdb.ConnectionException) as exc:
@@ -331,6 +336,38 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
         # a second connection with different config in one interpreter) --
         # different code path, same practical meaning for a monitor: the
         # store cannot be read right now.
+        #
+        # ...unless it is *our own* conversion holding the lock, which is normal
+        # operation rather than a fault. The cached timestamps are the current
+        # truth in that window, not stale data: last_ingest_at only advances when
+        # a conversion completes, so by definition it has not moved yet. Without
+        # this branch every upload would show up as a 70-270s outage.
+        if ingestor.converting_uuid and _LAST_ACTIVITY_CACHE:
+            cached_ingest = _LAST_ACTIVITY_CACHE.get("last_ingest_at")
+            cached_cuff = _LAST_ACTIVITY_CACHE.get("last_cuff_sync_at")
+            return JSONResponse(
+                content={
+                    "server": "ok",
+                    "db": "ok",
+                    "converting": ingestor.converting_uuid[:8],
+                    "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "last_ingest_at": cached_ingest,
+                    "last_cuff_sync_at": cached_cuff,
+                    **_data_freshness(
+                        cached_ingest,
+                        cached_cuff,
+                        settings.data_stale_hours,
+                        settings.data_critical_hours,
+                    ),
+                    # conversions_pending is known from the in-flight conversion
+                    # itself. conversions_failed is deliberately omitted rather
+                    # than reported as 0: it lives in the store, which cannot be
+                    # read right now, and a confident wrong zero is worse than a
+                    # missing key.
+                    "conversions_pending": 1,
+                    "recent_warnings": warnings,
+                },
+            )
         return JSONResponse(
             status_code=503,
             content={
@@ -363,6 +400,15 @@ async def healthz(settings: Annotated[Settings, Depends(get_settings)]) -> JSONR
             "recent_warnings": warnings,
         }
     )
+
+
+# Last successfully read activity timestamps.
+#
+# Kept so that a conversion in progress does not force the probe to say "cannot
+# read the store". DuckDB refuses a read-only open while another process holds
+# the write lock, and conversion now runs in a child process for 70-270s, so
+# without this every upload would look like a multi-minute outage.
+_LAST_ACTIVITY_CACHE: dict[str, str | None] = {}
 
 
 def _conversion_backlog(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
