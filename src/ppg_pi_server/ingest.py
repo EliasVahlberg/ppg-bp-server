@@ -32,6 +32,7 @@ import duckdb
 
 from ._corelib import converter
 from .schema import init_audit_schema, init_cuff_schema
+from .storelock import store_write_lock
 
 logger = logging.getLogger("ppg_pi_server.ingest")
 
@@ -305,14 +306,20 @@ class Ingestor:
         refuses two configurations for one file within a process, and /healthz
         holds the store read-only while conversion needs it read-write. See
         convert_worker for the full reasoning and the failure it fixes.
+
+        Held under the cross-process store write lock so a conversion and the
+        dashboard's derived-table refresh queue instead of racing. Before this,
+        the two collided and the ingest path fell back to its retry ladder,
+        reaching attempt 8 of 12 on 2026-10-21. See storelock.
         """
-        proc = subprocess.run(
-            [sys.executable, "-m", "ppg_pi_server.convert_worker",
-             str(bundle_dir), str(self.db_path)],
-            capture_output=True,
-            text=True,
-            timeout=self.CONVERT_TIMEOUT_S,
-        )
+        with store_write_lock(self.db_path, label=f"convert {bundle_dir.name[:8]}"):
+            proc = subprocess.run(
+                [sys.executable, "-m", "ppg_pi_server.convert_worker",
+                 str(bundle_dir), str(self.db_path)],
+                capture_output=True,
+                text=True,
+                timeout=self.CONVERT_TIMEOUT_S,
+            )
         if proc.returncode != 0:
             raise IngestError(
                 proc.stderr.strip()

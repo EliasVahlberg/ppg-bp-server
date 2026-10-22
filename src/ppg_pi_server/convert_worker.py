@@ -36,7 +36,7 @@ import json
 import sys
 from pathlib import Path
 
-from ._vendor.polar_ble import converter
+from ._corelib import converter
 
 
 def main(argv: list[str] | None = None) -> int:
