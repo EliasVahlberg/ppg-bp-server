@@ -20,6 +20,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import logging
+import urllib.error
 from unittest import mock
 
 import duckdb
@@ -397,3 +399,70 @@ def test_healthz_still_503s_when_locked_without_a_conversion() -> None:
 
     assert r.status_code == 503
     assert r.json()["db"] == "locked"
+
+
+class TestRefreshTrigger:
+    """The refresh trigger must treat 'store busy' as transient, not a fault.
+
+    Before this, a refresh that collided with a session conversion surfaced as
+    'analysis refresh failed ... HTTP Error 500' in /healthz's recent_warnings
+    (seen 09-12, 09-17 and 10-09). Nothing was broken; two writers simply
+    wanted one single-writer database.
+    """
+
+    def _http_error(self, code: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(
+            "http://dash/refresh", code, "busy", hdrs=None, fp=None
+        )
+
+    def test_success_on_first_try_does_not_retry(self, monkeypatch) -> None:
+        calls = []
+        monkeypatch.setattr(main.urllib.request, "urlopen",
+                            lambda *a, **k: calls.append(1) or mock.MagicMock())
+        main._trigger_analysis_refresh("http://dash/refresh")
+        assert len(calls) == 1
+
+    def test_retries_while_busy_then_succeeds(self, monkeypatch) -> None:
+        """A conversion holding the store must not cost us the refresh."""
+        attempts = {"n": 0}
+
+        def fake_urlopen(*a, **k):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise self._http_error(409)
+            return mock.MagicMock()
+
+        monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(main, "REFRESH_RETRY_SLEEP_S", 0.01)
+        main._trigger_analysis_refresh("http://dash/refresh")
+        assert attempts["n"] == 3, "should have retried past the busy responses"
+
+    def test_gives_up_after_the_budget(self, monkeypatch, caplog) -> None:
+        """Retrying forever would pin a background thread; it must stop and say
+        so, because the next trigger will catch the derived tables up."""
+        monkeypatch.setattr(
+            main.urllib.request, "urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(self._http_error(409)),
+        )
+        monkeypatch.setattr(main, "REFRESH_RETRY_SLEEP_S", 0.01)
+        monkeypatch.setattr(main, "REFRESH_TOTAL_BUDGET_S", 0.05)
+        with caplog.at_level(logging.WARNING):
+            main._trigger_analysis_refresh("http://dash/refresh")
+        assert any("still busy" in r.message for r in caplog.records)
+
+    def test_a_real_failure_is_still_reported_immediately(
+        self, monkeypatch, caplog
+    ) -> None:
+        """A 500 means the refresh genuinely broke. It must not be retried into
+        silence -- that would hide the class of bug this endpoint reveals."""
+        attempts = {"n": 0}
+
+        def fake_urlopen(*a, **k):
+            attempts["n"] += 1
+            raise self._http_error(500)
+
+        monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+        with caplog.at_level(logging.WARNING):
+            main._trigger_analysis_refresh("http://dash/refresh")
+        assert attempts["n"] == 1, "a 500 should not be retried"
+        assert any("refresh failed" in r.message for r in caplog.records)

@@ -36,6 +36,7 @@ import gzip
 import json
 import logging
 import time
+import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -124,15 +125,61 @@ recent_errors.setFormatter(
 _configure_logging()
 
 
+#: Total time the refresh trigger keeps retrying while the store is busy.
+#: Comfortably longer than the slowest observed conversion (~280s for a 24h
+#: session), so a refresh is not dropped just because a long session happened to
+#: be converting when the cuff synced.
+REFRESH_TOTAL_BUDGET_S = 900.0
+REFRESH_RETRY_SLEEP_S = 20.0
+
+
 def _trigger_analysis_refresh(url: str) -> None:
-    """Best-effort POST to the dashboard's /refresh (runs in a background task)."""
-    try:
-        urllib.request.urlopen(
-            urllib.request.Request(url, method="POST", data=b""), timeout=120
-        )
-        logger.info("analysis refresh triggered: %s", url)
-    except Exception as exc:  # noqa: BLE001 - never fail ingest on this
-        logger.warning("analysis refresh failed (%s): %s", url, exc)
+    """POST to the dashboard's /refresh, retrying while the store is busy.
+
+    Runs in a background task, so waiting here costs nothing user-visible.
+
+    The dashboard needs the store's write lock to recompute the derived tables,
+    and a session conversion may be holding it for minutes. It answers 409
+    "store busy" rather than blocking, so this retries until the store frees up.
+    Without the retry, a refresh that collided with a conversion would simply be
+    dropped and the derived tables would stay stale until the next cuff sync --
+    potentially days, since cuff upload is only enqueued by a manual Read Cuff.
+
+    409 is also returned when a refresh is already running, where giving up is
+    exactly right: the in-flight run covers the same data. Retrying is harmless
+    either way because a refresh is an idempotent recompute.
+
+    Only logs a warning if it ultimately gives up, so a normal conversion
+    overlap no longer shows up as a fault in /healthz's recent_warnings.
+    """
+    deadline = time.monotonic() + REFRESH_TOTAL_BUDGET_S
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(url, method="POST", data=b""), timeout=120
+            )
+            logger.info("analysis refresh triggered: %s (attempt %d)", url, attempt)
+            return
+        except urllib.error.HTTPError as exc:
+            if exc.code != 409:
+                logger.warning("analysis refresh failed (%s): %s", url, exc)
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "analysis refresh still busy after %.0fs, giving up (%s); "
+                    "derived tables will catch up on the next trigger",
+                    REFRESH_TOTAL_BUDGET_S, url,
+                )
+                return
+            logger.info("analysis refresh busy, retrying in %.0fs (%s)",
+                        REFRESH_RETRY_SLEEP_S, url)
+            time.sleep(min(REFRESH_RETRY_SLEEP_S, remaining))
+        except Exception as exc:  # noqa: BLE001 - never fail ingest on this
+            logger.warning("analysis refresh failed (%s): %s", url, exc)
+            return
 
 
 @asynccontextmanager
