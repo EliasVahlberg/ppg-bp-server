@@ -27,7 +27,7 @@
 #         (run under `uv run` so duckdb is importable)
 # Env:    PPG_PI_SERVER_DB_PATH, PPG_PI_SERVER_UPLOAD_DIR, PPG_PI_SERVER_TOKENS_FILE
 #         PPG_PI_BACKUP_DIR (default: ~/.local/share/ppg-pi-server-backups)
-#         PPG_PI_BACKUP_MEMORY_LIMIT (default 2GB), PPG_PI_BACKUP_THREADS (default 2)
+#         PPG_PI_BACKUP_MEMORY_LIMIT (default 1GB), PPG_PI_BACKUP_THREADS (default 2)
 
 set -euo pipefail
 
@@ -39,6 +39,6 @@ for a in "$@"; do
 done
 
 exec python -m ppg_pi_server.backup \
-    --memory-limit "${PPG_PI_BACKUP_MEMORY_LIMIT:-2GB}" \
+    --memory-limit "${PPG_PI_BACKUP_MEMORY_LIMIT:-1GB}" \
     --threads "${PPG_PI_BACKUP_THREADS:-2}" \
     run "$@"

@@ -21,8 +21,9 @@ Environment=PPG_PI_SERVER_UPLOAD_DIR=%h/.local/share/ppg-pi-server/uploads
 Environment=PPG_PI_SERVER_TOKENS_FILE=%h/.local/share/ppg-pi-server/tokens.json
 Environment=PPG_PI_BACKUP_DIR=%h/.local/share/ppg-pi-server-backups
 # DuckDB's own cap; it spills to disk beyond this. With defaults it took 80 % of
-# RAM and all 16 threads and peaked near 10 GB RSS.
-Environment=PPG_PI_BACKUP_MEMORY_LIMIT=2GB
+# RAM and all 16 threads and peaked near 10 GB RSS. At 1GB a full export peaks
+# at 1.44 GB RSS and takes 90 s (2GB: 2.68 GB, 86 s), measured 2026-10-25.
+Environment=PPG_PI_BACKUP_MEMORY_LIMIT=1GB
 Environment=PPG_PI_BACKUP_THREADS=2
 
 ExecStart=%h/.local/bin/uv run scripts/backup.sh --keep-full 5 --full-weekday 7

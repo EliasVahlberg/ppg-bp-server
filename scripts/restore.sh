@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-ARGS=(--memory-limit "${PPG_PI_BACKUP_MEMORY_LIMIT:-2GB}" --threads "${PPG_PI_BACKUP_THREADS:-2}")
+ARGS=(--memory-limit "${PPG_PI_BACKUP_MEMORY_LIMIT:-1GB}" --threads "${PPG_PI_BACKUP_THREADS:-2}")
 
 if [[ "${1:-}" == "--check" ]]; then
     shift

@@ -63,7 +63,7 @@ Set `PPG_PI_SERVER_BIND_HOST` in the unit before starting it. The default is loo
 
 ### Backups
 
-`scripts/backup.sh` takes a snapshot: raw uploads (hardlinked against the previous snapshot, so unchanged bundles cost no disk), the token allowlist, and a Parquet export of the DuckDB store over a read-only connection, so the server keeps serving. The export is a **weekly full** (Sunday by default) plus a **daily diff against that full** holding the sensor rows of newer sessions and full copies of the small tables. A day on which nothing changed produces no snapshot at all. Five fulls are kept, with their diffs. DuckDB runs with a 2 GB memory limit and 2 threads.
+`scripts/backup.sh` takes a snapshot: raw uploads (hardlinked against the previous snapshot, so unchanged bundles cost no disk), the token allowlist, and a Parquet export of the DuckDB store over a read-only connection, so the server keeps serving. The export is a **weekly full** (Sunday by default) plus a **daily diff against that full** holding the sensor rows of newer sessions and full copies of the small tables. A day on which nothing changed produces no snapshot at all. Five fulls are kept, with their diffs. DuckDB runs with a 1 GB memory limit and 2 threads (a full export peaks at ~1.4 GB RSS, down from ~10 GB).
 
 ```bash
 cp systemd/ppg-pi-backup.* ~/.config/systemd/user/

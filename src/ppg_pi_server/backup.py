@@ -78,7 +78,11 @@ INCOMING = ".incoming"
 #: Append-only per session; carry ~all of the rows. Diffed by session_id.
 BIG_TABLES = ("ppg", "acc", "gyro", "mag", "ppi")
 
-DEFAULT_MEMORY_LIMIT = "2GB"
+#: Measured on oldpc, full export of the 14.6 GB store, 2 threads: 2GB gave
+#: 2.68 GB max RSS in 86 s, 1GB gave 1.44 GB in 90 s (was ~10 GB with defaults).
+#: RSS exceeds the setting because Parquet writing allocates outside the
+#: buffer manager, so the systemd MemoryMax=3G backstop needs this headroom.
+DEFAULT_MEMORY_LIMIT = "1GB"
 DEFAULT_THREADS = 2
 #: A full is due once the newest one is at least this old, whatever the weekday,
 #: so a skipped or missed full-day does not push the base back indefinitely.
