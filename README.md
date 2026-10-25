@@ -63,12 +63,19 @@ Set `PPG_PI_SERVER_BIND_HOST` in the unit before starting it. The default is loo
 
 ### Backups
 
-`scripts/backup.sh` takes a snapshot: raw uploads (hardlinked against the previous snapshot, so unchanged bundles cost no disk), the token allowlist, and a Parquet export of the DuckDB store. The database export runs against a read-only connection, so the server keeps serving during a backup. Run it on a timer:
+`scripts/backup.sh` takes a snapshot: raw uploads (hardlinked against the previous snapshot, so unchanged bundles cost no disk), the token allowlist, and a Parquet export of the DuckDB store over a read-only connection, so the server keeps serving. The export is a **weekly full** (Sunday by default) plus a **daily diff against that full** holding the sensor rows of newer sessions and full copies of the small tables. A day on which nothing changed produces no snapshot at all. Five fulls are kept, with their diffs. DuckDB runs with a 2 GB memory limit and 2 threads.
 
 ```bash
 cp systemd/ppg-pi-backup.* ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ppg-pi-backup.timer   # daily, Persistent=true
+```
+
+Restore is a full plus at most one diff, into a new file, checked against the snapshot manifests:
+
+```bash
+uv run scripts/restore.sh <full-snapshot> [<diff-snapshot>] --out restored.duckdb
+uv run scripts/restore.sh --check     # restore the newest full + diff into scratch, verify, delete
 ```
 
 A snapshot on the same disk protects against database corruption, a bad migration, or an accidental delete. It does not protect against losing the disk, and off-machine replication is a precondition for ever deleting data from the phone (see #4).

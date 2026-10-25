@@ -1,89 +1,44 @@
 #!/usr/bin/env bash
-# Snapshot backup of an ppg-bp-server deployment.
+# Snapshot backup of an ppg-bp-server deployment: a weekly full, a daily
+# differential against that full, and nothing at all on days nothing changed.
 #
 # Backs up three things, in increasing order of how hard they are to replace:
 #
 #   1. tokens.json       -- small, but losing it means re-provisioning every phone.
-#   2. uploads/          -- the raw ROP bundles as the phone sent them. These are
-#                           the real source of truth: the DuckDB store is derived
-#                           from them and can be rebuilt.
-#   3. sessions.duckdb   -- exported to Parquet rather than copied. A file copy of
-#                           a database the server may be mid-write on can capture a
-#                           torn state; a read-only EXPORT DATABASE is consistent
-#                           and needs no downtime.
+#   2. uploads/          -- the raw ROP bundles as the phone sent them, hardlinked
+#                           against the previous snapshot (rsync --link-dest), so
+#                           unchanged bundles cost no extra disk.
+#   3. sessions.duckdb   -- exported to Parquet over a read-only connection, so the
+#                           server keeps serving. A full is EXPORT DATABASE; a diff
+#                           holds the sensor rows of sessions newer than the full
+#                           plus complete copies of the small tables. Restore is
+#                           always the full plus at most one diff.
 #
-# Uploads are hardlinked against the previous snapshot (rsync --link-dest), so
-# unchanged bundles cost no extra disk. Old snapshots are pruned by count.
+# DuckDB runs with a capped memory_limit and thread count, and spills to disk
+# beyond that. The logic lives in ppg_pi_server/backup.py; see its docstring for
+# the layout, the change detection, and why diffs are keyed on session_id.
 #
 # IMPORTANT: a snapshot on the same physical disk protects against database
 # corruption, an accidental delete, and a bad migration -- not against losing the
-# disk. Off-machine replication is a separate, harder requirement, and it is a
+# disk. Off-machine replication is a separate requirement, and it is a
 # precondition for ever deleting data from the phone (ppg-bp-server#4).
 #
-# Usage:  scripts/backup.sh [--keep N]
+# Usage:  scripts/backup.sh [--keep-full 5] [--full-weekday 7] [--force-full] [--no-prune]
+#         (run under `uv run` so duckdb is importable)
 # Env:    PPG_PI_SERVER_DB_PATH, PPG_PI_SERVER_UPLOAD_DIR, PPG_PI_SERVER_TOKENS_FILE
 #         PPG_PI_BACKUP_DIR (default: ~/.local/share/ppg-pi-server-backups)
+#         PPG_PI_BACKUP_MEMORY_LIMIT (default 2GB), PPG_PI_BACKUP_THREADS (default 2)
 
 set -euo pipefail
 
-KEEP=14
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --keep) KEEP="$2"; shift 2 ;;
-        *) echo "unknown argument: $1" >&2; exit 2 ;;
-    esac
+for a in "$@"; do
+    if [[ "$a" == "--keep" ]]; then
+        echo "--keep N was replaced by --keep-full N (number of weekly fulls kept)" >&2
+        exit 2
+    fi
 done
 
-DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-DB_PATH="${PPG_PI_SERVER_DB_PATH:-$DATA_HOME/ppg-pi-server/sessions.duckdb}"
-UPLOAD_DIR="${PPG_PI_SERVER_UPLOAD_DIR:-$DATA_HOME/ppg-pi-server/uploads}"
-TOKENS_FILE="${PPG_PI_SERVER_TOKENS_FILE:-$DATA_HOME/ppg-pi-server/tokens.json}"
-BACKUP_DIR="${PPG_PI_BACKUP_DIR:-$DATA_HOME/ppg-pi-server-backups}"
-
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-DEST="$BACKUP_DIR/$STAMP"
-PREV="$(ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | tail -1 || true)"
-
-mkdir -p "$DEST"
-
-# --- 1. tokens ------------------------------------------------------------
-if [[ -f "$TOKENS_FILE" ]]; then
-    install -m 600 "$TOKENS_FILE" "$DEST/tokens.json"
-fi
-
-# --- 2. raw uploads, hardlinked against the previous snapshot -------------
-if [[ -d "$UPLOAD_DIR" ]]; then
-    if [[ -n "$PREV" && -d "${PREV}uploads" ]]; then
-        rsync -a --link-dest="${PREV}uploads" "$UPLOAD_DIR/" "$DEST/uploads/"
-    else
-        rsync -a "$UPLOAD_DIR/" "$DEST/uploads/"
-    fi
-fi
-
-# --- 3. database, exported read-only so the server keeps serving ----------
-if [[ -f "$DB_PATH" ]]; then
-    python3 - "$DB_PATH" "$DEST/duckdb-export" <<'PY'
-import sys
-
-import duckdb
-
-db, out = sys.argv[1], sys.argv[2]
-con = duckdb.connect(db, read_only=True)
-try:
-    con.execute(f"EXPORT DATABASE '{out}' (FORMAT PARQUET)")
-finally:
-    con.close()
-PY
-fi
-
-# --- prune ----------------------------------------------------------------
-mapfile -t SNAPS < <(ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | sort)
-if (( ${#SNAPS[@]} > KEEP )); then
-    for old in "${SNAPS[@]:0:$(( ${#SNAPS[@]} - KEEP ))}"; do
-        rm -rf -- "$old"
-    done
-fi
-
-echo "snapshot: $DEST"
-du -sh "$DEST" 2>/dev/null | awk '{print "size (excl. hardlinks): " $1}'
-echo "snapshots kept: $(ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | wc -l) (limit $KEEP)"
+exec python -m ppg_pi_server.backup \
+    --memory-limit "${PPG_PI_BACKUP_MEMORY_LIMIT:-2GB}" \
+    --threads "${PPG_PI_BACKUP_THREADS:-2}" \
+    run "$@"

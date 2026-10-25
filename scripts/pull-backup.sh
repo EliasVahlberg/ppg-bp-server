@@ -93,7 +93,9 @@ verify() {
     # An unverified backup is not a backup. Load the export and count rows.
     local snap="$1"
     local exp="$snap/duckdb-export"
-    [ -d "$exp" ] || { note "no duckdb-export/ in ${snap##*/} -- cannot verify"; return 1; }
+    # Daily snapshots hold a differential export instead (see backup.py).
+    [ -d "$exp" ] || exp="$snap/duckdb-diff"
+    [ -d "$exp" ] || { note "no duckdb-export/ or duckdb-diff/ in ${snap##*/} -- cannot verify"; return 1; }
     if [ -z "$PY_BIN" ]; then
         note "no python with duckdb available; $(find "$exp" -name '*.parquet' | wc -l) parquet file(s) present, UNVERIFIED"
         return 1
@@ -143,6 +145,14 @@ if [ "$ALL" -eq 1 ]; then
     WANTED=("${REMOTE_SNAPS[@]}")
 else
     WANTED=("${REMOTE_SNAPS[-1]}")
+    # A daily snapshot is a diff, useless without the weekly full it is based on,
+    # so pull that too (first, so the diff hardlinks against it).
+    BASE="$(ssh "$REMOTE" "cat '$REMOTE_DIR/${REMOTE_SNAPS[-1]}/manifest.json' 2>/dev/null" \
+            | sed -n 's/^ *"base": *"\([0-9TZ]*\)".*/\1/p' | head -1)"
+    if [ -n "$BASE" ]; then
+        note "newest snapshot is a diff against $BASE; pulling both"
+        WANTED=("$BASE" "${REMOTE_SNAPS[-1]}")
+    fi
 fi
 
 for SNAP in "${WANTED[@]}"; do

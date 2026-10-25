@@ -1,6 +1,7 @@
 # Snapshot backup of the ingest server's data. Triggered by the timer of the
 # same name; safe to run at any time, since the DuckDB export is read-only and
-# needs no downtime.
+# needs no downtime. Weekly full on Sundays, a diff against it on other days,
+# nothing on days the store did not change; five fulls kept.
 #
 # Install (user service, no root):
 #   cp systemd/ppg-pi-backup.* ~/.config/systemd/user/
@@ -19,5 +20,18 @@ Environment=PPG_PI_SERVER_DB_PATH=%h/.local/share/ppg-pi-server/sessions.duckdb
 Environment=PPG_PI_SERVER_UPLOAD_DIR=%h/.local/share/ppg-pi-server/uploads
 Environment=PPG_PI_SERVER_TOKENS_FILE=%h/.local/share/ppg-pi-server/tokens.json
 Environment=PPG_PI_BACKUP_DIR=%h/.local/share/ppg-pi-server-backups
+# DuckDB's own cap; it spills to disk beyond this. With defaults it took 80 % of
+# RAM and all 16 threads and peaked near 10 GB RSS.
+Environment=PPG_PI_BACKUP_MEMORY_LIMIT=2GB
+Environment=PPG_PI_BACKUP_THREADS=2
 
-ExecStart=%h/.local/bin/uv run scripts/backup.sh --keep 14
+ExecStart=%h/.local/bin/uv run scripts/backup.sh --keep-full 5 --full-weekday 7
+
+# Backstops in case the in-process cap is exceeded (allocations outside DuckDB's
+# buffer manager are not counted by memory_limit). The machine also hosts other
+# services, which must not be pushed into swap by a backup.
+MemoryMax=3G
+MemorySwapMax=0
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
